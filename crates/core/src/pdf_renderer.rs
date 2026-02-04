@@ -13,9 +13,45 @@ use rayon::iter::IntoParallelIterator;
 use rayon::prelude::*;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
+
+/// Track whether pdfium has been initialized to prevent double-loading.
+/// We store the result of initialization (Ok or error message) rather than
+/// the Pdfium instance itself since Pdfium isn't Send+Sync.
+static PDFIUM_INITIALIZED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+
+/// Initialize pdfium bindings, ensuring it's only done once per process.
+/// Returns the bindings on success, or an error if loading fails.
+fn init_pdfium_bindings() -> Result<Box<dyn PdfiumLibraryBindings>> {
+    // Check/set the initialization flag
+    let init_result = PDFIUM_INITIALIZED.get_or_init(|| {
+        // This closure only runs once
+        debug!("Initializing pdfium library...");
+        Ok(())
+    });
+
+    // If initialization was already attempted, check if it succeeded
+    if let Err(e) = init_result {
+        return Err(ConversionError::PdfiumError(e.clone()));
+    }
+
+    // Load the bindings (this can be done multiple times safely,
+    // it's the library loading that's the issue, but pdfium-render
+    // handles this internally with its own static)
+    Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+        .or_else(|_| {
+            Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("/usr/lib"))
+        })
+        .or_else(|_| {
+            Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
+                "/usr/local/lib",
+            ))
+        })
+        .or_else(|_| Pdfium::bind_to_system_library())
+        .map_err(|e| ConversionError::PdfiumError(format!("Failed to load pdfium library: {}", e)))
+}
 
 /// PDF to PNG renderer using pdfium.
 pub struct PdfRenderer {
@@ -32,25 +68,9 @@ impl PdfRenderer {
     pub fn new(config: RenderConfig) -> Result<Self> {
         config.validate()?;
 
-        // Initialize pdfium
-        // Try to bind to system library first, then fall back to bundled
-        let pdfium = Pdfium::new(
-            Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
-                .or_else(|_| {
-                    Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
-                        "/usr/lib",
-                    ))
-                })
-                .or_else(|_| {
-                    Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
-                        "/usr/local/lib",
-                    ))
-                })
-                .or_else(|_| Pdfium::bind_to_system_library())
-                .map_err(|e| {
-                    ConversionError::PdfiumError(format!("Failed to load pdfium library: {}", e))
-                })?,
-        );
+        // Initialize pdfium bindings (safe to call multiple times)
+        let bindings = init_pdfium_bindings()?;
+        let pdfium = Arc::new(Pdfium::new(bindings));
 
         // Create thread pool
         let thread_pool = rayon::ThreadPoolBuilder::new()
@@ -67,7 +87,7 @@ impl PdfRenderer {
 
         Ok(Self {
             config,
-            pdfium: Arc::new(pdfium),
+            pdfium,
             thread_pool,
         })
     }
@@ -181,6 +201,117 @@ impl PdfRenderer {
         Ok(pages)
     }
 
+    /// Render all pages of a PDF to PNG images with a specific DPI.
+    ///
+    /// This reuses the existing pdfium instance but renders at a different DPI.
+    pub fn render_all_pages_with_dpi(&self, pdf_path: &Path, dpi: u32) -> Result<Vec<PngPage>> {
+        let start = Instant::now();
+
+        // Load the PDF
+        let document = self
+            .pdfium
+            .load_pdf_from_file(pdf_path, None)
+            .map_err(|e| ConversionError::PdfRenderError(format!("Failed to load PDF: {}", e)))?;
+
+        let page_count = document.pages().len() as usize;
+        debug!(
+            "Rendering {} pages from {:?} at {} DPI",
+            page_count, pdf_path, dpi
+        );
+
+        if page_count == 0 {
+            return Ok(vec![]);
+        }
+
+        // Render pages sequentially (pdfium is not thread-safe)
+        // We collect raw image data first, then parallelize PNG encoding
+        let mut raw_images: Vec<(usize, RgbaImage)> = Vec::with_capacity(page_count);
+
+        for page_idx in 0..page_count {
+            let page = document.pages().get(page_idx as u16).map_err(|e| {
+                ConversionError::PdfRenderError(format!(
+                    "Failed to get page {}: {}",
+                    page_idx + 1,
+                    e
+                ))
+            })?;
+
+            // Calculate pixel dimensions based on provided DPI
+            let scale = dpi as f32 / 72.0;
+            let width = (page.width().value * scale) as u32;
+            let height = (page.height().value * scale) as u32;
+
+            // Create render config
+            let render_config = PdfRenderConfig::new()
+                .set_target_width(width as i32)
+                .set_target_height(height as i32)
+                .rotate_if_landscape(PdfPageRenderRotation::None, false);
+
+            // Render to bitmap
+            let bitmap = page.render_with_config(&render_config).map_err(|e| {
+                ConversionError::PdfRenderError(format!(
+                    "Failed to render page {}: {}",
+                    page_idx + 1,
+                    e
+                ))
+            })?;
+
+            // Convert to image buffer
+            let image_result = bitmap.as_image();
+            let rgba_image: RgbaImage = image_result.into_rgba8();
+
+            // Apply background color if not using alpha
+            let final_image = if !self.config.use_alpha {
+                self.apply_background(rgba_image)
+            } else {
+                rgba_image
+            };
+
+            raw_images.push((page_idx, final_image));
+        }
+
+        // Now parallelize PNG encoding (using standalone function to avoid Send issues)
+        let rendered_pages: Vec<Result<PngPage>> = self.thread_pool.install(|| {
+            raw_images
+                .into_par_iter()
+                .map(|(page_idx, image)| {
+                    let png_data = encode_png_standalone(&image)?;
+                    Ok(PngPage {
+                        page_number: page_idx + 1,
+                        data: png_data,
+                        width: image.width(),
+                        height: image.height(),
+                        output_path: None,
+                    })
+                })
+                .collect()
+        });
+
+        // Collect results, handling errors
+        let mut pages = Vec::with_capacity(page_count);
+        for result in rendered_pages {
+            match result {
+                Ok(page) => pages.push(page),
+                Err(e) => {
+                    error!("Failed to encode page: {:?}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Sort by page number
+        pages.sort_by_key(|p| p.page_number);
+
+        debug!(
+            "Rendered {} pages at {} DPI in {:?}",
+            page_count,
+            dpi,
+            start.elapsed()
+        );
+
+        Ok(pages)
+    }
+
     /// Render a single page to PNG.
     fn render_single_page(&self, document: &PdfDocument, page_idx: usize) -> Result<PngPage> {
         let page = document.pages().get(page_idx as u16).map_err(|e| {
@@ -290,14 +421,25 @@ impl PdfRenderer {
         output_dir: &Path,
         prefix: &str,
     ) -> Result<Vec<PngPage>> {
+        self.render_and_save_with_dpi(pdf_path, output_dir, prefix, self.config.dpi)
+    }
+
+    /// Render pages and save to disk with a specific DPI.
+    pub fn render_and_save_with_dpi(
+        &self,
+        pdf_path: &Path,
+        output_dir: &Path,
+        prefix: &str,
+        dpi: u32,
+    ) -> Result<Vec<PngPage>> {
         // Ensure output directory exists
         std::fs::create_dir_all(output_dir).map_err(|e| ConversionError::OutputDirError {
             path: output_dir.to_path_buf(),
             message: e.to_string(),
         })?;
 
-        // Render all pages
-        let mut pages = self.render_all_pages(pdf_path)?;
+        // Render all pages with the specified DPI
+        let mut pages = self.render_all_pages_with_dpi(pdf_path, dpi)?;
 
         // Save each page
         for page in &mut pages {

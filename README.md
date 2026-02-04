@@ -282,6 +282,12 @@ source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 # Install test dependencies
 pip install pytest pytest-asyncio
 
+# Set library path for pdfium (run from repo root)
+# macOS:
+export DYLD_LIBRARY_PATH=$(pwd)/lib/lib:$DYLD_LIBRARY_PATH
+# Linux:
+export LD_LIBRARY_PATH=$(pwd)/lib/lib:$LD_LIBRARY_PATH
+
 # Run all tests
 pytest tests/ -v
 

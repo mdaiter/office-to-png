@@ -165,18 +165,18 @@ async def run_conversions(fixtures_dir: Path):
         print(f"  Failed: {batch_result.failure_count}")
         print(f"  Total pages: {batch_result.total_pages}")
         
-        # Example 3: Custom DPI
+        # Example 3: Custom DPI (using per-request DPI override)
         print()
         print("Step 7: Custom DPI Example")
         print("-" * 40)
         
-        high_dpi_converter = OfficeConverter(pool_size=1, dpi=300)
-        print(f"  Created high-DPI converter: {high_dpi_converter}")
+        print(f"  Using existing converter with DPI override (300)")
         
         start = time.time()
-        hd_result = await high_dpi_converter.convert(
+        hd_result = await converter.convert(
             str(fixtures_dir / "simple.docx"),
             str(output_path),
+            dpi=300,  # Override DPI for this request
             output_prefix="high_dpi"
         )
         elapsed = time.time() - start
@@ -198,8 +198,7 @@ async def run_conversions(fixtures_dir: Path):
         print("Step 9: Cleanup")
         print("-" * 40)
         await converter.shutdown()
-        await high_dpi_converter.shutdown()
-        print("  [OK] Converters shut down")
+        print("  [OK] Converter shut down")
         
         # Summary
         print()

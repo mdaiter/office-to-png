@@ -71,15 +71,9 @@ impl Converter {
         let dpi = request.dpi_override.unwrap_or(self.config.render.dpi);
         let prefix = request.get_output_prefix();
 
-        // If DPI is different from default, create a temporary renderer
-        let pages = if dpi != self.config.render.dpi {
-            let temp_config = RenderConfig::with_dpi(dpi);
-            let temp_renderer = PdfRenderer::new(temp_config)?;
-            temp_renderer.render_and_save(&pdf_path, &request.output_dir, &prefix)?
-        } else {
-            self.renderer
-                .render_and_save(&pdf_path, &request.output_dir, &prefix)?
-        };
+        // Use the existing renderer with the specified DPI
+        let pages = self.renderer
+            .render_and_save_with_dpi(&pdf_path, &request.output_dir, &prefix, dpi)?;
 
         // Clean up temp PDF
         if let Err(e) = std::fs::remove_file(&pdf_path) {
