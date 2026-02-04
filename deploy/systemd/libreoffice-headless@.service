@@ -1,0 +1,57 @@
+# Systemd service template for LibreOffice headless instances
+# Install to: /etc/systemd/system/libreoffice-headless@.service
+#
+# Usage:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable libreoffice-headless@{0..7}  # Enable 8 instances
+#   sudo systemctl start libreoffice-headless@{0..7}   # Start 8 instances
+#
+# Check status:
+#   sudo systemctl status libreoffice-headless@0
+
+[Unit]
+Description=LibreOffice Headless Instance %i
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+# Create instance-specific directories
+ExecStartPre=/bin/mkdir -p /var/lib/libreoffice/instance-%i
+ExecStartPre=/bin/chown www-data:www-data /var/lib/libreoffice/instance-%i
+
+# Start LibreOffice in headless mode
+ExecStart=/usr/bin/soffice \
+    --headless \
+    --invisible \
+    --nologo \
+    --nofirststartwizard \
+    --norestore \
+    --accept="socket,host=127.0.0.1,port=200%i;urp;StarOffice.ServiceManager" \
+    -env:UserInstallation=file:///var/lib/libreoffice/instance-%i
+
+# Restart on failure
+Restart=always
+RestartSec=5
+
+# Timeout settings
+TimeoutStartSec=30
+TimeoutStopSec=30
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=2G
+CPUQuota=200%
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/libreoffice/instance-%i
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

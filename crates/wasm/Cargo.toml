@@ -1,0 +1,89 @@
+[package]
+name = "office-to-png-wasm"
+version.workspace = true
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+description = "Canvas 2D-based Office document rendering for browsers"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Window",
+    "Element",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "ImageData",
+    "TextMetrics",
+    "Path2d",
+    "console",
+    "Performance",
+    "Navigator",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    # WebGPU features (optional, for future use)
+    "Gpu",
+    "GpuAdapter",
+    "GpuAdapterInfo",
+    "GpuDevice",
+    "GpuQueue",
+    "GpuCanvasContext",
+    "GpuTextureFormat",
+    "GpuCanvasConfiguration",
+    "GpuTexture",
+    "GpuTextureView",
+    "GpuCommandEncoder",
+    "GpuCommandBuffer",
+    "GpuRenderPassEncoder",
+    "GpuRenderPipeline",
+    "GpuBuffer",
+    "GpuShaderModule",
+    "GpuRenderPassDescriptor",
+    "GpuRenderPassColorAttachment",
+    "GpuLoadOp",
+    "GpuStoreOp",
+    "GpuSupportedLimits",
+] }
+
+# Document parsing
+docx-rs = "0.4"
+# Switch to umya-spreadsheet for full styling support
+umya-spreadsheet = "2.3"
+
+# Text shaping and layout
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
+
+# Image encoding/decoding
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+
+# Logging for WASM
+tracing = "0.1"
+tracing-wasm = "0.2"
+console_error_panic_hook = "0.1"
+
+# Async utilities
+futures = "0.3"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+webgpu = [] # Enable WebGPU rendering (future)

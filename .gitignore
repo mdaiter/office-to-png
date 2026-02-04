@@ -1,0 +1,64 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Test outputs
+*.png
+!/tests/fixtures/**/*.png
+
+# LibreOffice profiles (created during tests)
+libreoffice-profile-*/
+
+# Pdfium library (downloaded separately)
+/lib/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.whl
+.venv/
+venv/
+
+# WASM build outputs
+/pkg/
+*.wasm
+
+# Node.js (for demo page)
+node_modules/
+
+# Documentation builds
+/docs/_build/
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+coverage/

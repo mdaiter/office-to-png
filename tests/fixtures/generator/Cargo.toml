@@ -1,0 +1,22 @@
+[package]
+name = "fixture-generator"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "generate-fixtures"
+path = "src/main.rs"
+
+[dependencies]
+# DOCX generation
+docx-rs = "0.4"
+
+# XLSX generation  
+rust_xlsxwriter = "0.79"
+
+# Image generation for testing
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# File handling
+anyhow = "1"

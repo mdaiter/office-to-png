@@ -1,0 +1,33 @@
+[package]
+name = "office-to-png-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Python bindings for office-to-png"
+
+[lib]
+name = "office_to_png"
+crate-type = ["cdylib"]
+
+[dependencies]
+office-to-png-core = { path = "../core" }
+
+# PyO3
+pyo3 = { workspace = true }
+pyo3-async-runtimes = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = "0.23"

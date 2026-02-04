@@ -1,0 +1,65 @@
+[package]
+name = "office-to-png-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "High-performance Office document to PNG conversion with LibreOffice and pdfium"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+async-channel = { workspace = true }
+futures = { workspace = true }
+
+# PDF rendering
+pdfium-render = { workspace = true }
+
+# Image processing
+image = { workspace = true }
+png = { workspace = true }
+
+# Parallelism
+rayon = { workspace = true }
+crossbeam-channel = { workspace = true }
+num_cpus = { workspace = true }
+
+# Process management
+async-process = { workspace = true }
+which = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Temp files
+tempfile = { workspace = true }
+uuid = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[features]
+default = []
+# Static linking - link Pdfium at compile time instead of runtime.
+# Requires setting PDFIUM_STATIC_LIB_PATH environment variable during build.
+static = ["pdfium-render/static"]
+# Link against GNU C++ standard library (required for some static Pdfium builds)
+libstdc = ["pdfium-render/libstdc++"]
+# Link against LLVM C++ standard library (required for some static Pdfium builds)  
+libcpp = ["pdfium-render/libc++"]
+# Link against CoreGraphics on macOS (required for some static Pdfium builds)
+core_graphics = ["pdfium-render/core_graphics"]
+
+[[bench]]
+name = "conversion"
+harness = false

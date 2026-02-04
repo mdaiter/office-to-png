@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Office to PNG - Browser Demo</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f5f5f5;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            color: white;
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        header h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        header p {
+            opacity: 0.9;
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+        }
+
+        .container {
+            display: flex;
+            flex: 1;
+            padding: 1.5rem;
+            gap: 1.5rem;
+        }
+
+        .sidebar {
+            width: 300px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .card h3 {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+
+        .drop-zone {
+            border: 2px dashed #d1d5db;
+            border-radius: 8px;
+            padding: 2rem 1rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .drop-zone:hover, .drop-zone.drag-over {
+            border-color: #2563eb;
+            background: #eff6ff;
+        }
+
+        .drop-zone svg {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 0.75rem;
+            color: #9ca3af;
+        }
+
+        .drop-zone p {
+            color: #6b7280;
+            font-size: 0.875rem;
+        }
+
+        .drop-zone .file-types {
+            color: #9ca3af;
+            font-size: 0.75rem;
+            margin-top: 0.5rem;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .doc-info {
+            display: none;
+        }
+
+        .doc-info.visible {
+            display: block;
+        }
+
+        .doc-info .filename {
+            font-weight: 600;
+            color: #111827;
+            word-break: break-all;
+        }
+
+        .doc-info .meta {
+            color: #6b7280;
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .control-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .control-row label {
+            font-size: 0.875rem;
+            color: #374151;
+        }
+
+        .control-row input[type="range"] {
+            width: 120px;
+        }
+
+        .control-row input[type="number"] {
+            width: 60px;
+            padding: 0.25rem 0.5rem;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+        }
+
+        .page-nav {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .page-nav button {
+            padding: 0.5rem 1rem;
+            border: 1px solid #d1d5db;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .page-nav button:hover:not(:disabled) {
+            background: #f3f4f6;
+        }
+
+        .page-nav button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .page-nav span {
+            font-size: 0.875rem;
+            color: #374151;
+            min-width: 80px;
+            text-align: center;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            padding: 0.625rem 1rem;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+
+        .btn-secondary {
+            background: #f3f4f6;
+            color: #374151;
+            border: 1px solid #d1d5db;
+        }
+
+        .btn-secondary:hover {
+            background: #e5e7eb;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .canvas-container {
+            flex: 1;
+            background: #e5e7eb;
+            border-radius: 8px;
+            overflow: auto;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #render-canvas {
+            background: white;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }
+
+        .loading-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(255,255,255,0.9);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .loading-overlay.visible {
+            display: flex;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #e5e7eb;
+            border-top-color: #2563eb;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .status-bar {
+            padding: 0.75rem 1rem;
+            background: white;
+            border-radius: 0 0 8px 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.875rem;
+            color: #6b7280;
+            border-top: 1px solid #e5e7eb;
+        }
+
+        .status-bar .status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #9ca3af;
+        }
+
+        .status-dot.ready {
+            background: #10b981;
+        }
+
+        .status-dot.loading {
+            background: #f59e0b;
+            animation: pulse 1s infinite;
+        }
+
+        .status-dot.error {
+            background: #ef4444;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .sheet-tabs {
+            display: none;
+            gap: 0.25rem;
+            padding: 0.5rem;
+            background: #f3f4f6;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+
+        .sheet-tabs.visible {
+            display: flex;
+        }
+
+        .sheet-tab {
+            padding: 0.5rem 1rem;
+            background: white;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            font-size: 0.875rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .sheet-tab:hover {
+            background: #f9fafb;
+        }
+
+        .sheet-tab.active {
+            background: #2563eb;
+            color: white;
+            border-color: #2563eb;
+        }
+
+        .error-message {
+            display: none;
+            padding: 1rem;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 6px;
+            color: #dc2626;
+            font-size: 0.875rem;
+        }
+
+        .error-message.visible {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Office to PNG</h1>
+        <p>Render Word and Excel documents in the browser</p>
+    </header>
+
+    <div class="container">
+        <aside class="sidebar">
+            <div class="card">
+                <h3>Load Document</h3>
+                <div class="drop-zone" id="drop-zone">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                    </svg>
+                    <p>Drop file here or click to browse</p>
+                    <p class="file-types">.docx, .xlsx supported</p>
+                </div>
+                <input type="file" id="file-input" accept=".docx,.xlsx">
+            </div>
+
+            <div class="card doc-info" id="doc-info">
+                <h3>Document Info</h3>
+                <p class="filename" id="filename">-</p>
+                <p class="meta" id="doc-meta">-</p>
+            </div>
+
+            <div class="card sheet-tabs" id="sheet-tabs"></div>
+
+            <div class="card">
+                <h3>Display</h3>
+                <div class="controls">
+                    <div class="control-row">
+                        <label>Zoom</label>
+                        <input type="range" id="zoom" min="25" max="200" value="100">
+                        <span id="zoom-value">100%</span>
+                    </div>
+                    <div class="page-nav" id="page-nav">
+                        <button id="prev-page" disabled>&larr; Prev</button>
+                        <span id="page-info">Page 1 of 1</span>
+                        <button id="next-page" disabled>Next &rarr;</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Export</h3>
+                <button class="btn btn-primary" id="export-png" disabled style="width: 100%;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                    </svg>
+                    Export as PNG
+                </button>
+            </div>
+
+            <div class="error-message" id="error-message"></div>
+        </aside>
+
+        <main class="main-content">
+            <div class="canvas-container">
+                <canvas id="render-canvas" width="816" height="1056"></canvas>
+                <div class="loading-overlay" id="loading">
+                    <div class="spinner"></div>
+                    <p>Loading document...</p>
+                </div>
+            </div>
+            <div class="status-bar">
+                <div class="status">
+                    <div class="status-dot" id="status-dot"></div>
+                    <span id="status-text">Ready - Load a document to begin</span>
+                </div>
+                <span id="render-time"></span>
+            </div>
+        </main>
+    </div>
+
+    <script type="module">
+        // This will be replaced with actual WASM imports once built
+        // import init, { DocumentRenderer } from './pkg/office_to_png_wasm.js';
+
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const canvas = document.getElementById('render-canvas');
+        const ctx = canvas.getContext('2d');
+        const loading = document.getElementById('loading');
+        const docInfo = document.getElementById('doc-info');
+        const filename = document.getElementById('filename');
+        const docMeta = document.getElementById('doc-meta');
+        const zoomSlider = document.getElementById('zoom');
+        const zoomValue = document.getElementById('zoom-value');
+        const prevPage = document.getElementById('prev-page');
+        const nextPage = document.getElementById('next-page');
+        const pageInfo = document.getElementById('page-info');
+        const exportBtn = document.getElementById('export-png');
+        const sheetTabs = document.getElementById('sheet-tabs');
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const renderTime = document.getElementById('render-time');
+        const errorMessage = document.getElementById('error-message');
+
+        let currentFile = null;
+        let currentPage = 0;
+        let totalPages = 1;
+        let currentSheet = 0;
+        let documentType = null;
+        let renderer = null;
+
+        // Initialize
+        async function init() {
+            setStatus('loading', 'Loading WASM module...');
+            
+            try {
+                // In production, uncomment this:
+                // await initWasm();
+                // renderer = new DocumentRenderer('render-canvas');
+                
+                setStatus('ready', 'Ready - Load a document to begin');
+            } catch (err) {
+                setStatus('error', 'Failed to load WASM module');
+                showError('Failed to initialize: ' + err.message);
+            }
+        }
+
+        function setStatus(status, text) {
+            statusDot.className = 'status-dot ' + status;
+            statusText.textContent = text;
+        }
+
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.classList.add('visible');
+            setTimeout(() => errorMessage.classList.remove('visible'), 5000);
+        }
+
+        // Drag and drop
+        dropZone.addEventListener('click', () => fileInput.click());
+        
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('drag-over');
+        });
+
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('drag-over');
+        });
+
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file) handleFile(file);
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) handleFile(file);
+        });
+
+        async function handleFile(file) {
+            const ext = file.name.split('.').pop().toLowerCase();
+            
+            if (!['docx', 'xlsx'].includes(ext)) {
+                showError('Unsupported file type. Please use .docx or .xlsx files.');
+                return;
+            }
+
+            currentFile = file;
+            documentType = ext;
+            
+            loading.classList.add('visible');
+            setStatus('loading', 'Loading document...');
+
+            try {
+                const startTime = performance.now();
+                const arrayBuffer = await file.arrayBuffer();
+                const data = new Uint8Array(arrayBuffer);
+
+                // In production with WASM:
+                // if (ext === 'docx') {
+                //     const info = renderer.load_docx(data);
+                //     totalPages = info.page_count;
+                // } else {
+                //     const info = renderer.load_xlsx(data);
+                //     totalPages = info.page_count;
+                //     updateSheetTabs(renderer.get_sheet_names());
+                // }
+
+                // Demo mode - just show file info
+                totalPages = ext === 'docx' ? 1 : 1;
+                currentPage = 0;
+                currentSheet = 0;
+
+                const loadTime = performance.now() - startTime;
+                
+                // Update UI
+                docInfo.classList.add('visible');
+                filename.textContent = file.name;
+                docMeta.textContent = `${(file.size / 1024).toFixed(1)} KB • ${totalPages} ${ext === 'docx' ? 'page' : 'sheet'}${totalPages > 1 ? 's' : ''}`;
+                
+                if (ext === 'xlsx') {
+                    sheetTabs.classList.add('visible');
+                    // Demo: show sample sheet tabs
+                    updateSheetTabs(['Sheet1', 'Sheet2', 'Sheet3']);
+                } else {
+                    sheetTabs.classList.remove('visible');
+                }
+
+                updatePageNav();
+                exportBtn.disabled = false;
+                
+                // Render (demo mode - draw placeholder)
+                await renderDocument();
+                
+                renderTime.textContent = `Loaded in ${loadTime.toFixed(0)}ms`;
+                setStatus('ready', 'Document loaded');
+
+            } catch (err) {
+                showError('Failed to load document: ' + err.message);
+                setStatus('error', 'Failed to load document');
+            } finally {
+                loading.classList.remove('visible');
+            }
+        }
+
+        function updateSheetTabs(names) {
+            sheetTabs.innerHTML = '';
+            names.forEach((name, idx) => {
+                const tab = document.createElement('button');
+                tab.className = 'sheet-tab' + (idx === currentSheet ? ' active' : '');
+                tab.textContent = name;
+                tab.onclick = () => selectSheet(idx);
+                sheetTabs.appendChild(tab);
+            });
+        }
+
+        function selectSheet(idx) {
+            currentSheet = idx;
+            document.querySelectorAll('.sheet-tab').forEach((tab, i) => {
+                tab.classList.toggle('active', i === idx);
+            });
+            renderDocument();
+        }
+
+        function updatePageNav() {
+            prevPage.disabled = currentPage === 0;
+            nextPage.disabled = currentPage >= totalPages - 1;
+            pageInfo.textContent = `Page ${currentPage + 1} of ${totalPages}`;
+        }
+
+        prevPage.addEventListener('click', () => {
+            if (currentPage > 0) {
+                currentPage--;
+                updatePageNav();
+                renderDocument();
+            }
+        });
+
+        nextPage.addEventListener('click', () => {
+            if (currentPage < totalPages - 1) {
+                currentPage++;
+                updatePageNav();
+                renderDocument();
+            }
+        });
+
+        zoomSlider.addEventListener('input', () => {
+            const zoom = zoomSlider.value;
+            zoomValue.textContent = zoom + '%';
+            
+            const scale = zoom / 100;
+            canvas.style.transform = `scale(${scale})`;
+            canvas.style.transformOrigin = 'top left';
+        });
+
+        async function renderDocument() {
+            const startTime = performance.now();
+            
+            // Clear canvas
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // In production with WASM:
+            // if (documentType === 'docx') {
+            //     renderer.render_page(currentPage);
+            // } else {
+            //     renderer.render_sheet(currentSheet);
+            // }
+
+            // Demo mode - draw placeholder content
+            ctx.fillStyle = '#f0f0f0';
+            ctx.fillRect(72, 72, canvas.width - 144, canvas.height - 144);
+            
+            ctx.font = '24px Arial';
+            ctx.fillStyle = '#666';
+            ctx.textAlign = 'center';
+            ctx.fillText('Document Preview', canvas.width / 2, canvas.height / 2 - 20);
+            
+            ctx.font = '14px Arial';
+            ctx.fillStyle = '#999';
+            ctx.fillText('(WASM renderer not loaded - demo mode)', canvas.width / 2, canvas.height / 2 + 20);
+            ctx.fillText(`File: ${currentFile?.name || 'None'}`, canvas.width / 2, canvas.height / 2 + 50);
+
+            const elapsed = performance.now() - startTime;
+            renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms`;
+        }
+
+        exportBtn.addEventListener('click', async () => {
+            if (!currentFile) return;
+
+            const link = document.createElement('a');
+            link.download = currentFile.name.replace(/\.[^.]+$/, '') + '_page' + (currentPage + 1) + '.png';
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        });
+
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>
