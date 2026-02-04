@@ -2,13 +2,17 @@
 //!
 //! This module provides different rendering backends:
 //! - Canvas 2D: Primary backend using HTML5 Canvas 2D API
-//! - WebGPU: Future high-performance backend (behind feature flag)
+//! - WebGPU: High-performance GPU-accelerated backend
 
 mod canvas2d;
 mod traits;
+#[cfg(feature = "webgpu")]
+mod webgpu;
 
 pub use canvas2d::Canvas2DRenderer;
 pub use traits::{BorderStyle, Color, DrawCommand, RenderBackend, TextMetrics};
+#[cfg(feature = "webgpu")]
+pub use webgpu::WebGPURenderer;
 
 /// Default page dimensions (US Letter at 96 DPI)
 pub const DEFAULT_PAGE_WIDTH: f32 = 816.0; // 8.5 inches * 96

@@ -440,8 +440,7 @@
     </div>
 
     <script type="module">
-        // This will be replaced with actual WASM imports once built
-        // import init, { DocumentRenderer } from './pkg/office_to_png_wasm.js';
+        import init, { DocumentRenderer, supported_extensions } from './pkg/office_to_png_wasm.js';
 
         const dropZone = document.getElementById('drop-zone');
         const fileInput = document.getElementById('file-input');
@@ -469,18 +468,23 @@
         let currentSheet = 0;
         let documentType = null;
         let renderer = null;
+        let wasmLoaded = false;
 
         // Initialize
-        async function init() {
+        async function initApp() {
             setStatus('loading', 'Loading WASM module...');
             
             try {
-                // In production, uncomment this:
-                // await initWasm();
-                // renderer = new DocumentRenderer('render-canvas');
+                await init();
+                renderer = new DocumentRenderer('render-canvas');
+                wasmLoaded = true;
+                
+                const extensions = supported_extensions();
+                console.log('Supported extensions:', extensions);
                 
                 setStatus('ready', 'Ready - Load a document to begin');
             } catch (err) {
+                console.error('WASM init error:', err);
                 setStatus('error', 'Failed to load WASM module');
                 showError('Failed to initialize: ' + err.message);
             }
@@ -529,6 +533,11 @@
                 return;
             }
 
+            if (!wasmLoaded || !renderer) {
+                showError('WASM module not loaded. Please refresh the page.');
+                return;
+            }
+
             currentFile = file;
             documentType = ext;
             
@@ -540,18 +549,19 @@
                 const arrayBuffer = await file.arrayBuffer();
                 const data = new Uint8Array(arrayBuffer);
 
-                // In production with WASM:
-                // if (ext === 'docx') {
-                //     const info = renderer.load_docx(data);
-                //     totalPages = info.page_count;
-                // } else {
-                //     const info = renderer.load_xlsx(data);
-                //     totalPages = info.page_count;
-                //     updateSheetTabs(renderer.get_sheet_names());
-                // }
+                let info;
+                if (ext === 'docx') {
+                    info = renderer.load_docx(data);
+                    totalPages = info.page_count;
+                    sheetTabs.classList.remove('visible');
+                } else {
+                    info = renderer.load_xlsx(data);
+                    totalPages = info.page_count;
+                    const sheetNames = renderer.get_sheet_names();
+                    updateSheetTabs(sheetNames);
+                    sheetTabs.classList.add('visible');
+                }
 
-                // Demo mode - just show file info
-                totalPages = ext === 'docx' ? 1 : 1;
                 currentPage = 0;
                 currentSheet = 0;
 
@@ -560,27 +570,21 @@
                 // Update UI
                 docInfo.classList.add('visible');
                 filename.textContent = file.name;
-                docMeta.textContent = `${(file.size / 1024).toFixed(1)} KB • ${totalPages} ${ext === 'docx' ? 'page' : 'sheet'}${totalPages > 1 ? 's' : ''}`;
+                const typeLabel = ext === 'docx' ? 'page' : 'sheet';
+                docMeta.textContent = `${(file.size / 1024).toFixed(1)} KB • ${totalPages} ${typeLabel}${totalPages > 1 ? 's' : ''}`;
                 
-                if (ext === 'xlsx') {
-                    sheetTabs.classList.add('visible');
-                    // Demo: show sample sheet tabs
-                    updateSheetTabs(['Sheet1', 'Sheet2', 'Sheet3']);
-                } else {
-                    sheetTabs.classList.remove('visible');
-                }
-
                 updatePageNav();
                 exportBtn.disabled = false;
                 
-                // Render (demo mode - draw placeholder)
+                // Render the document
                 await renderDocument();
                 
                 renderTime.textContent = `Loaded in ${loadTime.toFixed(0)}ms`;
                 setStatus('ready', 'Document loaded');
 
             } catch (err) {
-                showError('Failed to load document: ' + err.message);
+                console.error('Load error:', err);
+                showError('Failed to load document: ' + (err.message || err));
                 setStatus('error', 'Failed to load document');
             } finally {
                 loading.classList.remove('visible');
@@ -638,35 +642,39 @@
         });
 
         async function renderDocument() {
+            if (!wasmLoaded || !renderer || !currentFile) {
+                return;
+            }
+            
             const startTime = performance.now();
             
-            // Clear canvas
-            ctx.fillStyle = 'white';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-            
-            // In production with WASM:
-            // if (documentType === 'docx') {
-            //     renderer.render_page(currentPage);
-            // } else {
-            //     renderer.render_sheet(currentSheet);
-            // }
+            try {
+                if (documentType === 'docx') {
+                    renderer.render_page(currentPage);
+                } else {
+                    renderer.render_sheet(currentSheet);
+                }
 
-            // Demo mode - draw placeholder content
-            ctx.fillStyle = '#f0f0f0';
-            ctx.fillRect(72, 72, canvas.width - 144, canvas.height - 144);
-            
-            ctx.font = '24px Arial';
-            ctx.fillStyle = '#666';
-            ctx.textAlign = 'center';
-            ctx.fillText('Document Preview', canvas.width / 2, canvas.height / 2 - 20);
-            
-            ctx.font = '14px Arial';
-            ctx.fillStyle = '#999';
-            ctx.fillText('(WASM renderer not loaded - demo mode)', canvas.width / 2, canvas.height / 2 + 20);
-            ctx.fillText(`File: ${currentFile?.name || 'None'}`, canvas.width / 2, canvas.height / 2 + 50);
-
-            const elapsed = performance.now() - startTime;
-            renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms`;
+                const elapsed = performance.now() - startTime;
+                renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms`;
+            } catch (err) {
+                console.error('Render error:', err);
+                
+                // Fallback - draw error message on canvas
+                ctx.fillStyle = 'white';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = '#f0f0f0';
+                ctx.fillRect(72, 72, canvas.width - 144, canvas.height - 144);
+                
+                ctx.font = '18px Arial';
+                ctx.fillStyle = '#c00';
+                ctx.textAlign = 'center';
+                ctx.fillText('Render Error', canvas.width / 2, canvas.height / 2 - 20);
+                
+                ctx.font = '14px Arial';
+                ctx.fillStyle = '#666';
+                ctx.fillText(err.message || String(err), canvas.width / 2, canvas.height / 2 + 20);
+            }
         }
 
         exportBtn.addEventListener('click', async () => {
@@ -679,7 +687,7 @@
         });
 
         // Initialize on load
-        init();
+        initApp();
     </script>
 </body>
 </html>

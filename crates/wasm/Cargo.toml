@@ -29,7 +29,7 @@ web-sys = { version = "0.3", features = [
     "Blob",
     "BlobPropertyBag",
     "Url",
-    # WebGPU features (optional, for future use)
+    # WebGPU features
     "Gpu",
     "GpuAdapter",
     "GpuAdapterInfo",
@@ -40,17 +40,36 @@ web-sys = { version = "0.3", features = [
     "GpuCanvasConfiguration",
     "GpuTexture",
     "GpuTextureView",
+    "GpuTextureDescriptor",
     "GpuCommandEncoder",
     "GpuCommandBuffer",
     "GpuRenderPassEncoder",
     "GpuRenderPipeline",
     "GpuBuffer",
+    "GpuBufferDescriptor",
     "GpuShaderModule",
+    "GpuShaderModuleDescriptor",
     "GpuRenderPassDescriptor",
     "GpuRenderPassColorAttachment",
     "GpuLoadOp",
     "GpuStoreOp",
     "GpuSupportedLimits",
+    "GpuColorTargetState",
+    "GpuVertexState",
+    "GpuFragmentState",
+    "GpuVertexBufferLayout",
+    "GpuVertexAttribute",
+    "GpuPrimitiveState",
+    "GpuRenderPipelineDescriptor",
+    "GpuPipelineLayout",
+    "GpuBindGroup",
+    "GpuBindGroupLayout",
+    "GpuBindGroupDescriptor",
+    "GpuBindGroupLayoutDescriptor",
+    "GpuBindGroupEntry",
+    "GpuBindGroupLayoutEntry",
+    "GpuSampler",
+    "GpuSamplerDescriptor",
 ] }
 
 # Document parsing
@@ -63,6 +82,9 @@ cosmic-text = { version = "0.12", default-features = false, features = ["std", "
 
 # Image encoding/decoding
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
+
+# Data casting for GPU buffers
+bytemuck = { version = "1.14", features = ["derive"] }
 
 # Error handling
 thiserror = "2"
@@ -80,6 +102,10 @@ console_error_panic_hook = "0.1"
 
 # Async utilities
 futures = "0.3"
+
+# WASM-specific dependencies  
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
