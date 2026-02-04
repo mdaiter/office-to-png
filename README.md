@@ -16,6 +16,8 @@ A high-performance Rust library for converting Microsoft Office documents (.docx
   - Parallel page rendering with rayon
   - LibreOffice instance pooling for batch conversions
   - WebGPU acceleration in browsers (optional)
+  - **Web Worker support** for non-blocking UI during document parsing
+  - Intelligent caching of parsed documents and rendered sheets
 
 - **Cross-platform**: Works on macOS, Linux, and Windows
 
@@ -156,6 +158,57 @@ const pngBytes = renderer.export_png();
 // const sheetNames = renderer.get_sheet_names();
 ```
 
+### JavaScript with Web Worker (Recommended for Large Documents)
+
+For better performance with large documents, use the Web Worker API to avoid blocking the main thread:
+
+```javascript
+import init, { DocumentRenderer, WorkerDocumentHolder } from './pkg/office_to_png_wasm.js';
+
+// In your Web Worker (worker.js):
+let docHolder = null;
+
+self.onmessage = async (e) => {
+    const { type, data } = e.data;
+    
+    if (type === 'init') {
+        const wasm = await import('./pkg/office_to_png_wasm.js');
+        await wasm.default();
+        docHolder = new wasm.WorkerDocumentHolder();
+        self.postMessage({ type: 'ready' });
+    }
+    
+    if (type === 'load') {
+        docHolder.load(data.bytes, data.docType);
+        self.postMessage({ type: 'loaded' });
+    }
+    
+    if (type === 'parse_sheet') {
+        // Parse sheet in worker (non-blocking)
+        const buffers = docHolder.parse_xlsx_sheet(
+            data.sheetIndex, 
+            data.requestId,
+            data.canvasWidth,
+            data.canvasHeight
+        );
+        // Transfer buffers back to main thread (zero-copy)
+        self.postMessage({ type: 'parsed', buffers }, buffers);
+    }
+};
+
+// In your main thread:
+const worker = new Worker('./worker.js', { type: 'module' });
+const renderer = new DocumentRenderer('my-canvas');
+
+worker.onmessage = (e) => {
+    if (e.data.type === 'parsed') {
+        const dataBytes = new Uint8Array(e.data.buffers[1]);
+        const imageBuffers = e.data.buffers.slice(2);
+        renderer.render_sheet_from_bytes(dataBytes, imageBuffers, sheetIndex);
+    }
+};
+```
+
 ### Python
 
 ```python
@@ -231,19 +284,49 @@ office-to-png/
 │   ├── wasm/           # Browser-side: Direct rendering
 │   │   ├── docx_renderer.rs  # DOCX parsing + rendering
 │   │   ├── xlsx_renderer.rs  # XLSX parsing + rendering
+│   │   ├── xlsx_grid_renderer.rs  # XLSX grid/cell rendering
 │   │   ├── renderer/
 │   │   │   ├── traits.rs     # RenderBackend trait
 │   │   │   ├── canvas2d.rs   # Canvas 2D implementation
 │   │   │   └── webgpu.rs     # WebGPU implementation
+│   │   ├── worker_api.rs     # Web Worker API for async parsing
+│   │   ├── render_data.rs    # Serializable render primitives
 │   │   └── text_shaper.rs    # cosmic-text integration
 │   │
 │   └── python/         # Python bindings via PyO3
+│
+├── demo/               # Interactive browser demo
+│   ├── index.html      # Demo UI with drag-and-drop
+│   ├── worker.js       # Web Worker for async document parsing
+│   └── pkg/            # Built WASM package
 │
 ├── tests/
 │   └── fixtures/       # Test documents
 │
 └── examples/           # Usage examples
 ```
+
+### Web Worker Architecture
+
+For optimal browser performance, the WASM crate supports a Web Worker architecture:
+
+```
+Main Thread                          Web Worker Thread
+────────────────                     ────────────────────
+DocumentRenderer                     WorkerDocumentHolder
+  - render_sheet_from_bytes()          - load() [parse once]
+  - render_page_from_bytes()           - parse_xlsx_sheet() [fast, cached]
+  - caching layer                      - parse_docx_page()
+       │                                    │
+       └──── Transferable ◄────────────────┘
+             ArrayBuffers (zero-copy)
+```
+
+This architecture:
+- Parses documents in a background thread (non-blocking UI)
+- Caches parsed document structure and styled sheet data
+- Uses Transferable ArrayBuffers for zero-copy data transfer
+- Supports request cancellation for rapid navigation
 
 ## Development
 
@@ -316,10 +399,25 @@ wasm-pack build crates/wasm --target web --release --features webgpu
 ### Running the Demo
 
 ```bash
+# Build the WASM package first
+wasm-pack build crates/wasm --target web
+
+# Copy to demo folder
+cp -r crates/wasm/pkg/* demo/pkg/
+
+# Serve the demo
 cd demo
 python3 -m http.server 8080
 # Open http://localhost:8080 in your browser
 ```
+
+The demo includes:
+- Drag-and-drop file upload
+- DOCX page navigation
+- XLSX sheet tabs with smooth switching
+- Zoom controls
+- PNG export
+- Web Worker integration for responsive UI
 
 ## Performance
 
@@ -339,6 +437,15 @@ WASM rendering (Chrome, Canvas 2D):
 | Parse DOCX | ~50ms |
 | Render page | ~30ms |
 | Export PNG | ~100ms |
+
+WASM with Web Worker (recommended for interactive apps):
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Initial document parse | ~100-500ms | Once per document, in worker |
+| Sheet switch (first time) | ~50-200ms | Extracts styling, cached |
+| Sheet switch (cached) | ~5-20ms | Layout + draw only |
+| Rapid sheet switching | Non-blocking | Debounced, stale results ignored |
 
 ## License
 
