@@ -5,6 +5,7 @@
 use crate::renderer::{points_to_pixels, Color, RenderBackend};
 use crate::text_layout::{Paragraph, Rect, TextAlign, TextRun, TextStyle};
 use docx_rs::*;
+use image::GenericImageView;
 use serde::{Deserialize, Serialize};
 
 /// Error type for DOCX operations.
@@ -925,6 +926,326 @@ impl DocxDocument {
                 _ => None,
             })
             .nth(index)
+    }
+
+    // ========== Worker API: Pre-computed Layout ==========
+
+    /// Compute pre-laid-out render primitives for a page.
+    /// This is the heavy operation designed to run in a Web Worker.
+    /// Returns the page data and a vector of image bytes (transferred separately).
+    pub fn get_page_data(
+        &self,
+        page: usize,
+    ) -> Option<(crate::render_data::DocxPageData, Vec<Vec<u8>>)> {
+        use crate::render_data::{
+            DocxPageData, ImageFormat, ImageMetadata, RenderPrimitive, RenderedImage, RenderedLine,
+            RenderedRect, RenderedText,
+        };
+
+        let content_area = self.content_area();
+        let page_height = content_area.height;
+        let page_start_y = page as f32 * page_height;
+        let page_end_y = page_start_y + page_height;
+
+        let mut primitives = Vec::new();
+        let mut images_meta = Vec::new();
+        let mut image_bytes = Vec::new();
+
+        // Start with clear
+        primitives.push(RenderPrimitive::Clear([1.0, 1.0, 1.0, 1.0]));
+
+        let mut current_y = 0.0;
+
+        for element in &self.elements {
+            let element_height = self.estimate_element_height(element, content_area.width);
+
+            // Check if element is visible on this page
+            if current_y + element_height >= page_start_y && current_y < page_end_y {
+                let render_y = content_area.y + (current_y - page_start_y);
+
+                if render_y >= content_area.y - element_height
+                    && render_y < content_area.y + content_area.height
+                {
+                    match element {
+                        DocumentElement::Paragraph(para) => {
+                            self.layout_paragraph(
+                                para,
+                                content_area.x,
+                                render_y,
+                                content_area.width,
+                                &mut primitives,
+                            );
+                        }
+                        DocumentElement::Table(table) => {
+                            self.layout_table(
+                                table,
+                                content_area.x,
+                                render_y,
+                                content_area.width,
+                                &mut primitives,
+                            );
+                        }
+                        DocumentElement::Image(img) => {
+                            if !img.data.is_empty() {
+                                let image_index = images_meta.len();
+
+                                // Decode image to get actual dimensions
+                                let (src_width, src_height) =
+                                    if let Ok(decoded) = image::load_from_memory(&img.data) {
+                                        decoded.dimensions()
+                                    } else {
+                                        (img.width as u32, img.height as u32)
+                                    };
+
+                                images_meta.push(ImageMetadata {
+                                    src_width,
+                                    src_height,
+                                    format: ImageFormat::from_str(&img.format),
+                                });
+                                image_bytes.push(img.data.clone());
+
+                                primitives.push(RenderPrimitive::Image(RenderedImage {
+                                    x: if img.is_inline { content_area.x } else { img.x },
+                                    y: if img.is_inline {
+                                        render_y
+                                    } else {
+                                        render_y + img.y
+                                    },
+                                    dest_width: points_to_pixels(img.width),
+                                    dest_height: points_to_pixels(img.height),
+                                    image_index,
+                                }));
+                            }
+                        }
+                        DocumentElement::PageBreak => {}
+                    }
+                }
+            }
+
+            current_y += element_height;
+        }
+
+        Some((
+            DocxPageData {
+                page_index: page,
+                page_width: points_to_pixels(self.page_width),
+                page_height: points_to_pixels(self.page_height),
+                primitives,
+                images: images_meta,
+            },
+            image_bytes,
+        ))
+    }
+
+    /// Get image bytes for a specific page (for separate Transferable).
+    pub fn get_image_bytes_for_page(&self, page: usize) -> Vec<Vec<u8>> {
+        if let Some((_, bytes)) = self.get_page_data(page) {
+            bytes
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Layout a paragraph into render primitives without drawing.
+    fn layout_paragraph(
+        &self,
+        para: &StyledParagraph,
+        x: f32,
+        y: f32,
+        width: f32,
+        primitives: &mut Vec<crate::render_data::RenderPrimitive>,
+    ) {
+        use crate::render_data::{RenderPrimitive, RenderedText};
+
+        let mut current_y = y + points_to_pixels(para.space_before);
+        let mut current_x = x + points_to_pixels(para.left_indent + para.first_line_indent);
+        let max_x = x + width - points_to_pixels(para.right_indent);
+        let line_height = para
+            .runs
+            .first()
+            .map(|r| points_to_pixels(r.font_size) * para.line_spacing * 1.2)
+            .unwrap_or(20.0);
+
+        for run in &para.runs {
+            let style = run.to_text_style();
+            let words: Vec<&str> = run.text.split_whitespace().collect();
+
+            for (i, word) in words.iter().enumerate() {
+                let word_with_space = if i < words.len() - 1 {
+                    format!("{} ", word)
+                } else {
+                    word.to_string()
+                };
+
+                // Estimate text width (simplified character-based)
+                let char_width = points_to_pixels(run.font_size) * 0.5;
+                let word_width = word_with_space.len() as f32 * char_width;
+
+                // Wrap to next line if needed
+                if current_x + word_width > max_x
+                    && current_x > x + points_to_pixels(para.left_indent)
+                {
+                    current_y += line_height;
+                    current_x = x + points_to_pixels(para.left_indent);
+                }
+
+                primitives.push(RenderPrimitive::Text(RenderedText {
+                    x: current_x,
+                    y: current_y + line_height * 0.8,
+                    text: word_with_space,
+                    font_family: run.font_family.clone(),
+                    font_size: run.font_size,
+                    bold: run.bold,
+                    italic: run.italic,
+                    underline: run.underline,
+                    strikethrough: run.strikethrough,
+                    color: style.color,
+                    background: style.background,
+                }));
+
+                current_x += word_width;
+            }
+        }
+    }
+
+    /// Layout a table into render primitives without drawing.
+    fn layout_table(
+        &self,
+        table: &Table,
+        x: f32,
+        y: f32,
+        max_width: f32,
+        primitives: &mut Vec<crate::render_data::RenderPrimitive>,
+    ) {
+        use crate::render_data::{RenderPrimitive, RenderedLine, RenderedRect, RenderedText};
+        use crate::renderer::Color;
+
+        let mut current_y = y;
+        let row_height = 25.0;
+
+        // Calculate scaled column widths
+        let total_width: f32 = table
+            .column_widths
+            .iter()
+            .map(|w| points_to_pixels(*w))
+            .sum();
+        let scale = if total_width > 0.0 {
+            max_width.min(total_width) / total_width
+        } else {
+            1.0
+        };
+        let scaled_widths: Vec<f32> = table
+            .column_widths
+            .iter()
+            .map(|w| points_to_pixels(*w) * scale)
+            .collect();
+
+        let border_color = [0.0, 0.0, 0.0, 1.0]; // Black
+
+        for row in &table.rows {
+            let mut current_x = x;
+
+            for (col_idx, cell) in row.cells.iter().enumerate() {
+                let cell_width =
+                    scaled_widths.get(col_idx).copied().unwrap_or(100.0) * cell.col_span as f32;
+
+                // Cell background
+                if let Some(ref bg) = cell.background {
+                    if let Some(color) = Color::from_hex(bg) {
+                        primitives.push(RenderPrimitive::Rect(RenderedRect {
+                            x: current_x,
+                            y: current_y,
+                            width: cell_width,
+                            height: row_height,
+                            fill: Some(color.to_rgba_array()),
+                            stroke: None,
+                        }));
+                    }
+                }
+
+                // Cell borders
+                // Top
+                primitives.push(RenderPrimitive::Line(RenderedLine {
+                    x1: current_x,
+                    y1: current_y,
+                    x2: current_x + cell_width,
+                    y2: current_y,
+                    color: border_color,
+                    width: 1.0,
+                }));
+                // Right
+                primitives.push(RenderPrimitive::Line(RenderedLine {
+                    x1: current_x + cell_width,
+                    y1: current_y,
+                    x2: current_x + cell_width,
+                    y2: current_y + row_height,
+                    color: border_color,
+                    width: 1.0,
+                }));
+                // Bottom
+                primitives.push(RenderPrimitive::Line(RenderedLine {
+                    x1: current_x,
+                    y1: current_y + row_height,
+                    x2: current_x + cell_width,
+                    y2: current_y + row_height,
+                    color: border_color,
+                    width: 1.0,
+                }));
+                // Left
+                primitives.push(RenderPrimitive::Line(RenderedLine {
+                    x1: current_x,
+                    y1: current_y,
+                    x2: current_x,
+                    y2: current_y + row_height,
+                    color: border_color,
+                    width: 1.0,
+                }));
+
+                // Cell text
+                let text: String = cell
+                    .paragraphs
+                    .iter()
+                    .flat_map(|p| p.runs.iter())
+                    .map(|r| r.text.as_str())
+                    .collect();
+
+                if !text.is_empty() {
+                    let style = cell
+                        .paragraphs
+                        .first()
+                        .and_then(|p| p.runs.first())
+                        .map(|r| r.to_text_style())
+                        .unwrap_or_default();
+
+                    // Clip text to cell
+                    primitives.push(RenderPrimitive::Save);
+                    primitives.push(RenderPrimitive::Clip {
+                        x: current_x,
+                        y: current_y,
+                        width: cell_width,
+                        height: row_height,
+                    });
+                    primitives.push(RenderPrimitive::Text(RenderedText {
+                        x: current_x + 4.0,
+                        y: current_y + row_height * 0.7,
+                        text,
+                        font_family: style.font_family,
+                        font_size: style.font_size,
+                        bold: style.bold,
+                        italic: style.italic,
+                        underline: style.underline,
+                        strikethrough: style.strikethrough,
+                        color: style.color,
+                        background: style.background,
+                    }));
+                    primitives.push(RenderPrimitive::Restore);
+                }
+
+                current_x += cell_width;
+            }
+
+            current_y += row_height;
+        }
     }
 }
 

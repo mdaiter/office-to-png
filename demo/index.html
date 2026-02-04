@@ -442,11 +442,15 @@
     <script type="module">
         import init, { DocumentRenderer, supported_extensions } from './pkg/office_to_png_wasm.js';
 
+        // ==========================================================================
+        // DOM Elements
+        // ==========================================================================
         const dropZone = document.getElementById('drop-zone');
         const fileInput = document.getElementById('file-input');
         const canvas = document.getElementById('render-canvas');
         const ctx = canvas.getContext('2d');
         const loading = document.getElementById('loading');
+        const loadingText = loading.querySelector('p');
         const docInfo = document.getElementById('doc-info');
         const filename = document.getElementById('filename');
         const docMeta = document.getElementById('doc-meta');
@@ -462,7 +466,11 @@
         const renderTime = document.getElementById('render-time');
         const errorMessage = document.getElementById('error-message');
 
+        // ==========================================================================
+        // State
+        // ==========================================================================
         let currentFile = null;
+        let currentDocBytes = null;  // Raw document bytes (kept for sync fallback)
         let currentPage = 0;
         let totalPages = 1;
         let currentSheet = 0;
@@ -470,10 +478,167 @@
         let renderer = null;
         let wasmLoaded = false;
 
-        // Initialize
+        // Web Worker state
+        let worker = null;
+        let workerReady = false;
+        let workerDocLoaded = false;  // Has the worker received the document?
+        let useWorker = true;  // Set to false to force synchronous mode
+        let pendingRequestId = 0;
+        let pendingSheetIndex = -1;  // Track which sheet is being parsed
+        let debounceTimer = null;
+        const DEBOUNCE_MS = 100;  // Debounce delay
+
+        // ==========================================================================
+        // Web Worker Setup
+        // ==========================================================================
+        
+        function initWorker() {
+            if (typeof Worker === 'undefined') {
+                console.warn('Web Workers not supported, using synchronous mode');
+                useWorker = false;
+                return;
+            }
+
+            try {
+                worker = new Worker('./worker.js', { type: 'module' });
+                
+                worker.onmessage = handleWorkerMessage;
+                worker.onerror = (err) => {
+                    console.error('Worker error:', err);
+                    useWorker = false;
+                    workerReady = false;
+                    setStatus('ready', 'Worker failed - using sync mode');
+                };
+            } catch (err) {
+                console.warn('Failed to create Web Worker, using synchronous mode:', err);
+                useWorker = false;
+            }
+        }
+
+        function handleWorkerMessage(e) {
+            const { type, ...data } = e.data;
+
+            switch (type) {
+                case 'ready':
+                    console.log('Worker ready, initializing WASM...');
+                    worker.postMessage({ type: 'init' });
+                    break;
+
+                case 'init_complete':
+                    console.log('Worker WASM initialized');
+                    workerReady = true;
+                    break;
+
+                case 'document_loaded':
+                    console.log('Worker document loaded');
+                    workerDocLoaded = true;
+                    break;
+
+                case 'document_cleared':
+                    console.log('Worker document cleared');
+                    workerDocLoaded = false;
+                    break;
+
+                case 'xlsx_sheet_parsed':
+                    handleSheetParsed(data);
+                    break;
+
+                case 'docx_page_parsed':
+                    handlePageParsed(data);
+                    break;
+
+                case 'error':
+                    console.error('Worker error:', data.error);
+                    hideLoading();
+                    showError('Worker error: ' + data.error);
+                    
+                    // Fall back to sync rendering
+                    if (data.requestId === pendingRequestId) {
+                        renderDocumentSync();
+                    }
+                    break;
+
+                case 'cancelled':
+                    console.log('Request cancelled:', data.requestId);
+                    break;
+            }
+        }
+
+        function handleSheetParsed({ sheetIndex, requestId, buffers }) {
+            // Check if this is still the current request (staleness detection)
+            if (!renderer.is_current_version(requestId)) {
+                console.log('Stale sheet result, ignoring:', requestId);
+                return;
+            }
+
+            console.log(`[Main] Received sheet ${sheetIndex} from worker, drawing...`);
+            const startTime = performance.now();
+
+            try {
+                // buffers[0] = header (bincode), buffers[1] = data (bincode), buffers[2+] = images
+                const t1 = performance.now();
+                const dataBytes = new Uint8Array(buffers[1]);
+                // Image buffers (if any) start at index 2
+                const imageBuffers = buffers.slice(2);
+                console.log(`[Main] Buffer prep: ${(performance.now() - t1).toFixed(1)}ms, data size: ${dataBytes.length} bytes`);
+
+                const t2 = performance.now();
+                renderer.render_sheet_from_bytes(dataBytes, imageBuffers, sheetIndex);
+                console.log(`[Main] render_sheet_from_bytes: ${(performance.now() - t2).toFixed(1)}ms`);
+
+                const elapsed = performance.now() - startTime;
+                renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms (worker)`;
+                setStatus('ready', 'Document loaded');
+            } catch (err) {
+                console.error('Render from bytes error:', err);
+                showError('Render error: ' + err.message);
+                // Fall back to sync
+                renderDocumentSync();
+            } finally {
+                hideLoading();
+            }
+        }
+
+        function handlePageParsed({ pageIndex, requestId, buffers }) {
+            // Check if this is still the current request (staleness detection)
+            if (!renderer.is_current_version(requestId)) {
+                console.log('Stale page result, ignoring:', requestId);
+                return;
+            }
+
+            const startTime = performance.now();
+
+            try {
+                // buffers[0] = header, buffers[1] = data, buffers[2+] = images
+                const dataBytes = new Uint8Array(buffers[1]);
+                // Image buffers (if any) start at index 2
+                const imageBuffers = buffers.slice(2);
+
+                renderer.render_page_from_bytes(dataBytes, imageBuffers, pageIndex);
+
+                const elapsed = performance.now() - startTime;
+                renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms (worker)`;
+                setStatus('ready', 'Document loaded');
+            } catch (err) {
+                console.error('Render from bytes error:', err);
+                showError('Render error: ' + err.message);
+                // Fall back to sync
+                renderDocumentSync();
+            } finally {
+                hideLoading();
+            }
+        }
+
+        // ==========================================================================
+        // Initialization
+        // ==========================================================================
+
         async function initApp() {
             setStatus('loading', 'Loading WASM module...');
             
+            // Start worker initialization in parallel
+            initWorker();
+
             try {
                 await init();
                 renderer = new DocumentRenderer('render-canvas');
@@ -490,6 +655,10 @@
             }
         }
 
+        // ==========================================================================
+        // UI Helpers
+        // ==========================================================================
+
         function setStatus(status, text) {
             statusDot.className = 'status-dot ' + status;
             statusText.textContent = text;
@@ -501,7 +670,19 @@
             setTimeout(() => errorMessage.classList.remove('visible'), 5000);
         }
 
-        // Drag and drop
+        function showLoading(message = 'Loading...') {
+            loadingText.textContent = message;
+            loading.classList.add('visible');
+        }
+
+        function hideLoading() {
+            loading.classList.remove('visible');
+        }
+
+        // ==========================================================================
+        // Drag and Drop
+        // ==========================================================================
+
         dropZone.addEventListener('click', () => fileInput.click());
         
         dropZone.addEventListener('dragover', (e) => {
@@ -525,6 +706,10 @@
             if (file) handleFile(file);
         });
 
+        // ==========================================================================
+        // File Handling
+        // ==========================================================================
+
         async function handleFile(file) {
             const ext = file.name.split('.').pop().toLowerCase();
             
@@ -541,23 +726,47 @@
             currentFile = file;
             documentType = ext;
             
-            loading.classList.add('visible');
+            showLoading('Loading document...');
             setStatus('loading', 'Loading document...');
 
             try {
                 const startTime = performance.now();
                 const arrayBuffer = await file.arrayBuffer();
-                const data = new Uint8Array(arrayBuffer);
+                currentDocBytes = new Uint8Array(arrayBuffer);
+
+                // Clear any cached data from previous document
+                renderer.clear_cache();
+                workerDocLoaded = false;
+
+                // Send document to worker (once, not on every sheet switch)
+                // Use transferable to avoid blocking main thread
+                if (useWorker && workerReady && worker) {
+                    // Create a copy for the worker (original kept for sync fallback)
+                    const workerCopy = currentDocBytes.buffer.slice(0);
+                    worker.postMessage({
+                        type: 'load_document',
+                        docBytes: workerCopy,
+                        docType: ext
+                    }, [workerCopy]);  // Transfer the copy
+                    
+                    // Set flag optimistically - worker will have the doc by the time
+                    // user clicks a sheet tab (message is already queued)
+                    workerDocLoaded = true;
+                }
 
                 let info;
                 if (ext === 'docx') {
-                    info = renderer.load_docx(data);
+                    console.log(`[Main] Loading DOCX (${currentDocBytes.length} bytes)...`);
+                    info = renderer.load_docx(currentDocBytes);
                     totalPages = info.page_count;
+                    console.log(`[Main] DOCX loaded: ${totalPages} pages, title: ${info.title || '(none)'}`);
                     sheetTabs.classList.remove('visible');
                 } else {
-                    info = renderer.load_xlsx(data);
+                    console.log(`[Main] Loading XLSX (${currentDocBytes.length} bytes)...`);
+                    info = renderer.load_xlsx(currentDocBytes);
                     totalPages = info.page_count;
                     const sheetNames = renderer.get_sheet_names();
+                    console.log(`[Main] XLSX loaded: ${totalPages} sheets:`, sheetNames);
                     updateSheetTabs(sheetNames);
                     sheetTabs.classList.add('visible');
                 }
@@ -576,8 +785,8 @@
                 updatePageNav();
                 exportBtn.disabled = false;
                 
-                // Render the document
-                await renderDocument();
+                // Render the initial view (use sync for first render, it's faster)
+                renderDocumentSync();
                 
                 renderTime.textContent = `Loaded in ${loadTime.toFixed(0)}ms`;
                 setStatus('ready', 'Document loaded');
@@ -586,10 +795,13 @@
                 console.error('Load error:', err);
                 showError('Failed to load document: ' + (err.message || err));
                 setStatus('error', 'Failed to load document');
-            } finally {
-                loading.classList.remove('visible');
+                hideLoading();
             }
         }
+
+        // ==========================================================================
+        // Sheet/Page Navigation
+        // ==========================================================================
 
         function updateSheetTabs(names) {
             sheetTabs.innerHTML = '';
@@ -603,6 +815,8 @@
         }
 
         function selectSheet(idx) {
+            if (idx === currentSheet) return;
+            
             currentSheet = idx;
             document.querySelectorAll('.sheet-tab').forEach((tab, i) => {
                 tab.classList.toggle('active', i === idx);
@@ -616,21 +830,20 @@
             pageInfo.textContent = `Page ${currentPage + 1} of ${totalPages}`;
         }
 
-        prevPage.addEventListener('click', () => {
-            if (currentPage > 0) {
-                currentPage--;
-                updatePageNav();
-                renderDocument();
-            }
-        });
+        function goToPage(page) {
+            if (page === currentPage || page < 0 || page >= totalPages) return;
+            
+            currentPage = page;
+            updatePageNav();
+            renderDocument();
+        }
 
-        nextPage.addEventListener('click', () => {
-            if (currentPage < totalPages - 1) {
-                currentPage++;
-                updatePageNav();
-                renderDocument();
-            }
-        });
+        prevPage.addEventListener('click', () => goToPage(currentPage - 1));
+        nextPage.addEventListener('click', () => goToPage(currentPage + 1));
+
+        // ==========================================================================
+        // Zoom
+        // ==========================================================================
 
         zoomSlider.addEventListener('input', () => {
             const zoom = zoomSlider.value;
@@ -641,52 +854,178 @@
             canvas.style.transformOrigin = 'top left';
         });
 
+        // ==========================================================================
+        // Rendering
+        // ==========================================================================
+
         async function renderDocument() {
             if (!wasmLoaded || !renderer || !currentFile) {
                 return;
             }
+
+            // Check cache first - instant render from cached data
+            if (documentType === 'xlsx' && renderer.has_cached_sheet(currentSheet)) {
+                console.log(`[Main] Cache hit for sheet ${currentSheet}`);
+                renderFromCache('sheet', currentSheet);
+                return;
+            }
+            if (documentType === 'docx' && renderer.has_cached_page(currentPage)) {
+                console.log(`[Main] Cache hit for page ${currentPage}`);
+                renderFromCache('page', currentPage);
+                return;
+            }
+
+            // ALWAYS debounce to handle rapid clicking
+            // This prevents queueing up many expensive parse requests
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
+            }
             
+            // Show loading immediately for visual feedback
+            showLoading('Loading...');
+            
+            debounceTimer = setTimeout(() => {
+                // Use worker if available AND document is loaded in worker
+                if (useWorker && workerReady && workerDocLoaded && worker) {
+                    console.log(`[Main] Using worker for ${documentType === 'xlsx' ? 'sheet ' + currentSheet : 'page ' + currentPage}`);
+                    renderDocumentAsync();
+                } else {
+                    console.log(`[Main] Using sync (useWorker=${useWorker}, ready=${workerReady}, docLoaded=${workerDocLoaded})`);
+                    renderDocumentSync();
+                }
+            }, DEBOUNCE_MS);
+        }
+
+        function renderDocumentAsync() {
+            // Cancel any pending request by sending new request ID
+            const requestId = renderer.begin_render();
+            pendingRequestId = requestId;
+
+            console.log(`[Main] Async render request: ${documentType} index=${documentType === 'xlsx' ? currentSheet : currentPage}, requestId=${requestId}`);
+
+            showLoading('Parsing...');
+            setStatus('loading', 'Parsing document...');
+
+            // Only send the index - document bytes already in worker memory
+            if (documentType === 'xlsx') {
+                worker.postMessage({
+                    type: 'parse_xlsx_sheet',
+                    sheetIndex: currentSheet,
+                    requestId,
+                    canvasWidth: canvas.width,
+                    canvasHeight: canvas.height
+                });
+            } else {
+                worker.postMessage({
+                    type: 'parse_docx_page',
+                    pageIndex: currentPage,
+                    requestId
+                });
+            }
+        }
+
+        function renderDocumentSync() {
             const startTime = performance.now();
             
             try {
+                showLoading('Rendering...');
+                
                 if (documentType === 'docx') {
+                    console.log(`[Main] Sync rendering DOCX page ${currentPage}`);
                     renderer.render_page(currentPage);
+                    console.log(`[Main] DOCX page ${currentPage} rendered`);
                 } else {
+                    console.log(`[Main] Sync rendering XLSX sheet ${currentSheet}`);
                     renderer.render_sheet(currentSheet);
+                    console.log(`[Main] XLSX sheet ${currentSheet} rendered`);
                 }
 
                 const elapsed = performance.now() - startTime;
-                renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms`;
+                renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms (sync)`;
+                setStatus('ready', 'Document loaded');
             } catch (err) {
                 console.error('Render error:', err);
-                
-                // Fallback - draw error message on canvas
-                ctx.fillStyle = 'white';
-                ctx.fillRect(0, 0, canvas.width, canvas.height);
-                ctx.fillStyle = '#f0f0f0';
-                ctx.fillRect(72, 72, canvas.width - 144, canvas.height - 144);
-                
-                ctx.font = '18px Arial';
-                ctx.fillStyle = '#c00';
-                ctx.textAlign = 'center';
-                ctx.fillText('Render Error', canvas.width / 2, canvas.height / 2 - 20);
-                
-                ctx.font = '14px Arial';
-                ctx.fillStyle = '#666';
-                ctx.fillText(err.message || String(err), canvas.width / 2, canvas.height / 2 + 20);
+                drawErrorOnCanvas(err);
+            } finally {
+                hideLoading();
             }
         }
+
+        function renderFromCache(type, index) {
+            const startTime = performance.now();
+
+            try {
+                if (type === 'sheet') {
+                    const dataBytes = renderer.get_cached_sheet_bytes(index);
+                    const imageBuffers = renderer.get_cached_sheet_images(index);
+                    if (dataBytes) {
+                        renderer.render_sheet_from_bytes(dataBytes, imageBuffers, index);
+                    } else {
+                        // Cache miss, fallback to sync
+                        renderDocumentSync();
+                        return;
+                    }
+                } else {
+                    const dataBytes = renderer.get_cached_page_bytes(index);
+                    const imageBuffers = renderer.get_cached_page_images(index);
+                    if (dataBytes) {
+                        renderer.render_page_from_bytes(dataBytes, imageBuffers, index);
+                    } else {
+                        // Cache miss, fallback to sync
+                        renderDocumentSync();
+                        return;
+                    }
+                }
+
+                const elapsed = performance.now() - startTime;
+                renderTime.textContent = `Rendered in ${elapsed.toFixed(1)}ms (cached)`;
+                setStatus('ready', 'Document loaded');
+            } catch (err) {
+                console.error('Cache render error:', err);
+                // Clear bad cache entry and retry
+                renderer.clear_cache();
+                renderDocumentSync();
+            }
+        }
+
+        function drawErrorOnCanvas(err) {
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#f0f0f0';
+            ctx.fillRect(72, 72, canvas.width - 144, canvas.height - 144);
+            
+            ctx.font = '18px Arial';
+            ctx.fillStyle = '#c00';
+            ctx.textAlign = 'center';
+            ctx.fillText('Render Error', canvas.width / 2, canvas.height / 2 - 20);
+            
+            ctx.font = '14px Arial';
+            ctx.fillStyle = '#666';
+            ctx.fillText(err.message || String(err), canvas.width / 2, canvas.height / 2 + 20);
+            
+            setStatus('error', 'Render failed');
+        }
+
+        // ==========================================================================
+        // Export
+        // ==========================================================================
 
         exportBtn.addEventListener('click', async () => {
             if (!currentFile) return;
 
             const link = document.createElement('a');
-            link.download = currentFile.name.replace(/\.[^.]+$/, '') + '_page' + (currentPage + 1) + '.png';
+            const suffix = documentType === 'xlsx' 
+                ? '_sheet' + (currentSheet + 1) 
+                : '_page' + (currentPage + 1);
+            link.download = currentFile.name.replace(/\.[^.]+$/, '') + suffix + '.png';
             link.href = canvas.toDataURL('image/png');
             link.click();
         });
 
-        // Initialize on load
+        // ==========================================================================
+        // Initialize on Load
+        // ==========================================================================
+        
         initApp();
     </script>
 </body>

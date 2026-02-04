@@ -42,8 +42,14 @@ impl Canvas2DRenderer {
         // Get device pixel ratio for high-DPI displays
         let dpr = window.device_pixel_ratio() as f32;
 
-        let width = canvas.client_width() as f32;
-        let height = canvas.client_height() as f32;
+        // Use canvas width/height attributes, not clientWidth/clientHeight
+        // clientWidth is CSS pixels which may be 0 if not styled
+        let width = canvas.width() as f32 / dpr;
+        let height = canvas.height() as f32 / dpr;
+
+        // If canvas has 0 dimensions, use reasonable defaults
+        let width = if width > 0.0 { width } else { 816.0 };
+        let height = if height > 0.0 { height } else { 1056.0 };
 
         let renderer = Self {
             canvas,
@@ -53,7 +59,7 @@ impl Canvas2DRenderer {
             dpr,
         };
 
-        // Set up high-DPI scaling
+        // Set up high-DPI scaling (this may resize the canvas buffer)
         renderer.setup_high_dpi()?;
 
         Ok(renderer)
@@ -71,8 +77,13 @@ impl Canvas2DRenderer {
         let window = web_sys::window().ok_or("No window")?;
         let dpr = window.device_pixel_ratio() as f32;
 
-        let width = canvas.client_width() as f32;
-        let height = canvas.client_height() as f32;
+        // Use canvas width/height attributes, not clientWidth/clientHeight
+        let width = canvas.width() as f32 / dpr;
+        let height = canvas.height() as f32 / dpr;
+
+        // If canvas has 0 dimensions, use reasonable defaults
+        let width = if width > 0.0 { width } else { 816.0 };
+        let height = if height > 0.0 { height } else { 1056.0 };
 
         let renderer = Self {
             canvas,
@@ -90,11 +101,18 @@ impl Canvas2DRenderer {
     /// Set up high-DPI rendering
     fn setup_high_dpi(&self) -> Result<(), String> {
         // Scale canvas buffer size for high-DPI
-        let buffer_width = (self.width * self.dpr) as u32;
-        let buffer_height = (self.height * self.dpr) as u32;
+        // Clamp to avoid exceeding browser canvas limits (max ~16384x16384 on most browsers)
+        const MAX_CANVAS_DIM: u32 = 16384;
+        let buffer_width = ((self.width * self.dpr) as u32).min(MAX_CANVAS_DIM);
+        let buffer_height = ((self.height * self.dpr) as u32).min(MAX_CANVAS_DIM);
 
         self.canvas.set_width(buffer_width);
         self.canvas.set_height(buffer_height);
+
+        // Reset transform first to avoid accumulating scales
+        self.ctx
+            .set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .map_err(|e| format!("Failed to reset transform: {:?}", e))?;
 
         // Scale the context so drawing operations work in CSS pixels
         self.ctx
@@ -171,8 +189,10 @@ impl RenderBackend for Canvas2DRenderer {
         self.height = height;
 
         // Update canvas buffer size
-        let buffer_width = (width * self.dpr) as u32;
-        let buffer_height = (height * self.dpr) as u32;
+        // Clamp to avoid exceeding browser canvas limits
+        const MAX_CANVAS_DIM: u32 = 16384;
+        let buffer_width = ((width * self.dpr) as u32).min(MAX_CANVAS_DIM);
+        let buffer_height = ((height * self.dpr) as u32).min(MAX_CANVAS_DIM);
 
         self.canvas.set_width(buffer_width);
         self.canvas.set_height(buffer_height);
