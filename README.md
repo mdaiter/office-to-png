@@ -64,7 +64,17 @@ wasm-pack build crates/wasm --target web
 
 ```bash
 cd crates/python
+
+# Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install maturin and build
+pip install maturin
 maturin develop
+
+# Verify installation
+python -c "from office_to_png import is_libreoffice_available; print('LibreOffice:', is_libreoffice_available())"
 ```
 
 ## Usage
@@ -150,18 +160,37 @@ const pngBytes = renderer.export_png();
 
 ```python
 import asyncio
-from office_to_png import Converter, ConversionRequest
+from office_to_png import OfficeConverter
 
 async def main():
-    converter = await Converter.create(pool_size=4, dpi=150)
+    # Create converter with 4 LibreOffice instances
+    converter = OfficeConverter(pool_size=4, dpi=150)
     
-    result = await converter.convert("document.docx", "output/")
+    # Convert a single file
+    result = await converter.convert("document.docx", "./output")
+    print(f"Converted {result.page_count} pages in {result.duration_secs:.2f}s")
     
-    for page in result.pages:
-        print(f"Generated: {page.path}")
+    for path in result.output_paths:
+        print(f"  Generated: {path}")
+    
+    # Batch convert with progress callback
+    def on_progress(p):
+        print(f"[{p.file_index + 1}/{p.total_files}] {p.stage}: {p.current_file}")
+    
+    batch_result = await converter.convert_batch(
+        ["doc1.docx", "doc2.xlsx", "doc3.docx"],
+        "./output",
+        progress_callback=on_progress
+    )
+    print(f"Batch: {batch_result.success_count} succeeded, {batch_result.failure_count} failed")
+    
+    # Cleanup
+    await converter.shutdown()
 
 asyncio.run(main())
 ```
+
+See `examples/python_quickstart.py` for a complete walkthrough.
 
 ## Configuration
 
@@ -229,7 +258,7 @@ office-to-png/
 ### Running Tests
 
 ```bash
-# All tests
+# All Rust tests
 cargo test
 
 # Core crate only
@@ -240,6 +269,27 @@ cargo test --package office-to-png-wasm
 
 # With LibreOffice integration tests
 LIBREOFFICE_PATH=/path/to/soffice cargo test
+```
+
+### Python Tests
+
+```bash
+cd crates/python
+
+# Activate the virtual environment (if not already active)
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install test dependencies
+pip install pytest pytest-asyncio
+
+# Run all tests
+pytest tests/ -v
+
+# Run only tests that don't require LibreOffice
+pytest tests/ -v -m "not requires_libreoffice"
+
+# Run the quickstart example
+python ../../examples/python_quickstart.py
 ```
 
 ### Building WASM

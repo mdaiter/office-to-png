@@ -29,5 +29,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Utilities
+which = { workspace = true }
+
 [build-dependencies]
 pyo3-build-config = "0.23"

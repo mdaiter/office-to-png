@@ -46,6 +46,9 @@ build/
 *.whl
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+htmlcov/
 
 # WASM build outputs
 /pkg/

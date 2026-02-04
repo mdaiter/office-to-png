@@ -36,7 +36,7 @@ dev = [
 ]
 
 [project.urls]
-Repository = "https://github.com/example/office-to-png"
+Repository = "https://github.com/mdaiter/office-to-png"
 
 [tool.maturin]
 python-source = "python"

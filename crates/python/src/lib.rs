@@ -7,11 +7,11 @@
 //!
 //! ```python
 //! import asyncio
-//! from office_to_png import OfficeConverter, ConversionRequest
+//! from office_to_png import OfficeConverter
 //!
 //! async def main():
-//!     # Create converter with 4 workers and 300 DPI
-//!     converter = OfficeConverter(pool_size=4, dpi=300)
+//!     # Create converter with 4 workers and 150 DPI
+//!     converter = OfficeConverter(pool_size=4, dpi=150)
 //!     
 //!     # Convert a single file
 //!     result = await converter.convert("document.docx", "./output")
@@ -32,15 +32,12 @@
 
 use office_to_png_core::{
     BatchResult, ConversionProgress, ConversionRequest, ConversionStage, Converter,
-    ConverterBuilder, ConverterConfig, FileResult, PngPage,
+    ConverterConfig, FileResult, PngPage,
 };
-use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex;
 
 /// Python wrapper for ConversionProgress.
 #[pyclass(name = "ConversionProgress")]
@@ -198,7 +195,7 @@ impl PyBatchResult {
     }
 }
 
-/// Python wrapper for PngPage (for streaming).
+/// Python wrapper for PngPage.
 #[pyclass(name = "PngPage")]
 #[derive(Clone)]
 pub struct PyPngPage {
@@ -257,19 +254,22 @@ impl PyPngPage {
 /// This converter uses LibreOffice for document rendering and pdfium for
 /// PDF-to-PNG conversion, with parallel processing for maximum throughput.
 ///
+/// Note: This class is not thread-safe due to pdfium limitations. Create
+/// separate instances for different threads if needed.
+///
 /// Args:
-///     pool_size: Number of LibreOffice instances (default: CPU count)
-///     dpi: Output DPI (default: 300)
+///     pool_size: Number of LibreOffice instances (default: 2)
+///     dpi: Output DPI (default: 150)
 ///     conversion_timeout: Timeout per document in seconds (default: 120)
 ///     render_threads: Number of PNG rendering threads (default: CPU count)
 ///
 /// Example:
-///     >>> converter = OfficeConverter(pool_size=4, dpi=300)
+///     >>> converter = OfficeConverter(pool_size=4, dpi=150)
 ///     >>> result = await converter.convert("doc.docx", "./output")
-#[pyclass(name = "OfficeConverter")]
+#[pyclass(name = "OfficeConverter", unsendable)]
 pub struct PyOfficeConverter {
-    converter: Arc<Mutex<Option<Converter>>>,
-    runtime: Arc<Runtime>,
+    runtime: Runtime,
+    converter: Option<Converter>,
     config: ConverterConfig,
 }
 
@@ -301,34 +301,29 @@ impl PyOfficeConverter {
         // Validate config
         config
             .validate()
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         // Create runtime
         let runtime = Runtime::new().map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
         Ok(Self {
-            converter: Arc::new(Mutex::new(None)),
-            runtime: Arc::new(runtime),
+            runtime,
+            converter: None,
             config,
         })
     }
 
     /// Initialize the converter (called automatically on first use).
-    fn initialize<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let converter_arc = Arc::clone(&self.converter);
-        let config = self.config.clone();
-        let runtime = Arc::clone(&self.runtime);
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = converter_arc.lock().await;
-            if guard.is_none() {
-                let converter = Converter::new(config)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                *guard = Some(converter);
-            }
-            Ok(())
-        })
+    fn initialize(&mut self) -> PyResult<()> {
+        if self.converter.is_none() {
+            let config = self.config.clone();
+            let converter = self
+                .runtime
+                .block_on(async { Converter::new(config).await })
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            self.converter = Some(converter);
+        }
+        Ok(())
     }
 
     /// Convert a single document to PNG images.
@@ -343,46 +338,36 @@ impl PyOfficeConverter {
     ///     FileResult with information about the conversion
     #[pyo3(signature = (input_path, output_dir, dpi=None, output_prefix=None))]
     fn convert<'py>(
-        &self,
+        &mut self,
         py: Python<'py>,
         input_path: String,
         output_dir: String,
         dpi: Option<u32>,
         output_prefix: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let converter_arc = Arc::clone(&self.converter);
-        let config = self.config.clone();
-        let runtime = Arc::clone(&self.runtime);
+        // Ensure initialized
+        self.initialize()?;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Ensure initialized
-            let mut guard = converter_arc.lock().await;
-            if guard.is_none() {
-                let converter = Converter::new(config)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                *guard = Some(converter);
-            }
+        // Build request
+        let mut request = ConversionRequest::new(input_path, output_dir);
+        if let Some(d) = dpi {
+            request = request.with_dpi(d);
+        }
+        if let Some(prefix) = output_prefix {
+            request = request.with_prefix(prefix);
+        }
 
-            let converter = guard.as_ref().unwrap();
+        let converter = self.converter.as_ref().unwrap();
 
-            // Build request
-            let mut request = ConversionRequest::new(input_path, output_dir);
-            if let Some(d) = dpi {
-                request = request.with_dpi(d);
-            }
-            if let Some(prefix) = output_prefix {
-                request = request.with_prefix(prefix);
-            }
+        // Run conversion in the runtime
+        let result = self
+            .runtime
+            .block_on(async { converter.convert(request).await })
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
-            // Convert
-            let result = converter
-                .convert(request)
-                .await
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-
-            Ok(PyFileResult::from(result))
-        })
+        // Return as a coroutine that immediately resolves
+        let py_result = PyFileResult::from(result);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(py_result) })
     }
 
     /// Convert multiple documents in batch.
@@ -398,7 +383,7 @@ impl PyOfficeConverter {
     ///     BatchResult with information about all conversions
     #[pyo3(signature = (input_paths, output_dir, dpi=None, progress_callback=None, concurrency=None))]
     fn convert_batch<'py>(
-        &self,
+        &mut self,
         py: Python<'py>,
         input_paths: Vec<String>,
         output_dir: String,
@@ -406,36 +391,28 @@ impl PyOfficeConverter {
         progress_callback: Option<PyObject>,
         concurrency: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let converter_arc = Arc::clone(&self.converter);
-        let config = self.config.clone();
+        // Ensure initialized
+        self.initialize()?;
+
         let pool_size = self.config.pool.pool_size;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Ensure initialized
-            let mut guard = converter_arc.lock().await;
-            if guard.is_none() {
-                let converter = Converter::new(config)
-                    .await
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-                *guard = Some(converter);
-            }
+        // Build requests
+        let requests: Vec<ConversionRequest> = input_paths
+            .into_iter()
+            .map(|path| {
+                let mut req = ConversionRequest::new(path, output_dir.clone());
+                if let Some(d) = dpi {
+                    req = req.with_dpi(d);
+                }
+                req
+            })
+            .collect();
 
-            let converter = guard.as_ref().unwrap();
+        let converter = self.converter.as_ref().unwrap();
 
-            // Build requests
-            let requests: Vec<ConversionRequest> = input_paths
-                .into_iter()
-                .map(|path| {
-                    let mut req = ConversionRequest::new(path, output_dir.clone());
-                    if let Some(d) = dpi {
-                        req = req.with_dpi(d);
-                    }
-                    req
-                })
-                .collect();
-
-            // Convert with or without progress
-            let result = if let Some(callback) = progress_callback {
+        // Convert with or without progress
+        let result = if let Some(callback) = progress_callback {
+            self.runtime.block_on(async {
                 converter
                     .convert_batch_with_progress(requests, move |progress| {
                         Python::with_gil(|py| {
@@ -446,51 +423,49 @@ impl PyOfficeConverter {
                         });
                     })
                     .await
-            } else {
-                let concurrent = concurrency.unwrap_or(pool_size);
-                converter.convert_parallel(requests, concurrent).await
-            };
+            })
+        } else {
+            let concurrent = concurrency.unwrap_or(pool_size);
+            self.runtime
+                .block_on(async { converter.convert_parallel(requests, concurrent).await })
+        };
 
-            Ok(PyBatchResult::from(result))
-        })
+        // Return as a coroutine that immediately resolves
+        let py_result = PyBatchResult::from(result);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(py_result) })
     }
 
     /// Get health information about the converter.
     fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let converter_arc = Arc::clone(&self.converter);
+        let health_str = if let Some(converter) = &self.converter {
+            let health = self.runtime.block_on(async { converter.health().await });
+            format!(
+                "Pool: {}/{} instances, {} total processed, shutdown={}",
+                health
+                    .instances
+                    .iter()
+                    .filter(|i| !i.is_busy)
+                    .count(),
+                health.pool_size,
+                health.total_processed,
+                health.is_shutdown
+            )
+        } else {
+            "Not initialized".to_string()
+        };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = converter_arc.lock().await;
-            if let Some(converter) = guard.as_ref() {
-                let health = converter.health().await;
-                Ok(format!(
-                    "Pool: {}/{} instances, {} total processed, shutdown={}",
-                    health
-                        .instances
-                        .iter()
-                        .filter(|i| !i.is_busy)
-                        .count(),
-                    health.pool_size,
-                    health.total_processed,
-                    health.is_shutdown
-                ))
-            } else {
-                Ok("Not initialized".to_string())
-            }
-        })
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { Ok(health_str) })
     }
 
     /// Shutdown the converter and release resources.
-    fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let converter_arc = Arc::clone(&self.converter);
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = converter_arc.lock().await;
-            if let Some(converter) = guard.take() {
+    fn shutdown<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(converter) = self.converter.take() {
+            self.runtime.block_on(async {
                 converter.shutdown().await;
-            }
-            Ok(())
-        })
+            });
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(()) })
     }
 
     /// Get the configured pool size.
@@ -513,34 +488,6 @@ impl PyOfficeConverter {
     }
 }
 
-/// Iterator for streaming page-by-page conversion.
-#[pyclass(name = "PageIterator")]
-pub struct PyPageIterator {
-    pages: Vec<PyPngPage>,
-    current: usize,
-}
-
-#[pymethods]
-impl PyPageIterator {
-    fn __iter__(slf: PyRef<Self>) -> PyRef<Self> {
-        slf
-    }
-
-    fn __next__(&mut self) -> Option<PyPngPage> {
-        if self.current < self.pages.len() {
-            let page = self.pages[self.current].clone();
-            self.current += 1;
-            Some(page)
-        } else {
-            None
-        }
-    }
-
-    fn __len__(&self) -> usize {
-        self.pages.len()
-    }
-}
-
 /// Check if LibreOffice is installed and available.
 #[pyfunction]
 fn is_libreoffice_available() -> bool {
@@ -549,6 +496,7 @@ fn is_libreoffice_available() -> bool {
         .is_ok()
         || std::path::Path::new("/Applications/LibreOffice.app/Contents/MacOS/soffice").exists()
         || std::path::Path::new("/usr/bin/soffice").exists()
+        || std::path::Path::new("/opt/homebrew/bin/soffice").exists()
 }
 
 /// Get the path to the LibreOffice binary if available.
@@ -557,6 +505,7 @@ fn get_libreoffice_path() -> Option<String> {
     // Check common locations
     let candidates = [
         "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+        "/opt/homebrew/bin/soffice",
         "/usr/bin/soffice",
         "/usr/lib/libreoffice/program/soffice",
         "/opt/libreoffice/program/soffice",
@@ -602,7 +551,6 @@ fn office_to_png(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFileResult>()?;
     m.add_class::<PyBatchResult>()?;
     m.add_class::<PyPngPage>()?;
-    m.add_class::<PyPageIterator>()?;
 
     m.add_function(wrap_pyfunction!(is_libreoffice_available, m)?)?;
     m.add_function(wrap_pyfunction!(get_libreoffice_path, m)?)?;

@@ -42,7 +42,6 @@ from .office_to_png import (
     FileResult,
     BatchResult,
     PngPage,
-    PageIterator,
     
     # Utility functions
     is_libreoffice_available,
@@ -62,7 +61,6 @@ __all__ = [
     "FileResult", 
     "BatchResult",
     "PngPage",
-    "PageIterator",
     
     # Utilities
     "is_libreoffice_available",
