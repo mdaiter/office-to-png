@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+<head><title>WASM Test</title></head>
+<body>
+    <h1>WASM Test</h1>
+    <p id="status">Loading...</p>
+    <input type="file" id="file" accept=".docx,.xlsx">
+    <canvas id="canvas" width="800" height="600" style="border:1px solid #ccc;"></canvas>
+    
+    <script type="module">
+        const status = document.getElementById('status');
+        
+        try {
+            status.textContent = 'Importing WASM...';
+            const { default: init, DocumentRenderer, supported_extensions } = await import('./pkg/office_to_png_wasm.js');
+            
+            status.textContent = 'Initializing WASM...';
+            await init();
+            
+            status.textContent = 'Creating renderer...';
+            const renderer = new DocumentRenderer('canvas');
+            
+            const exts = supported_extensions();
+            status.textContent = 'Ready! Supported: ' + exts.join(', ');
+            
+            document.getElementById('file').onchange = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                
+                status.textContent = 'Loading ' + file.name + '...';
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                const ext = file.name.split('.').pop().toLowerCase();
+                
+                try {
+                    if (ext === 'docx') {
+                        const info = renderer.load_docx(bytes);
+                        status.textContent = 'Loaded DOCX: ' + info.page_count + ' pages';
+                        renderer.render_page(0);
+                    } else if (ext === 'xlsx') {
+                        const info = renderer.load_xlsx(bytes);
+                        status.textContent = 'Loaded XLSX: ' + info.page_count + ' sheets';
+                        renderer.render_sheet(0);
+                    }
+                    status.textContent += ' - Rendered!';
+                } catch (err) {
+                    status.textContent = 'Render error: ' + err;
+                    console.error(err);
+                }
+            };
+        } catch (err) {
+            status.textContent = 'WASM Error: ' + err;
+            console.error(err);
+        }
+    </script>
+</body>
+</html>

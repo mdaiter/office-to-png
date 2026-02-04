@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head><title>Server HD Test</title></head>
+<body>
+    <h1>Server HD Test</h1>
+    <p><strong>Server:</strong> <input type="text" id="server-url" value="http://localhost:8085" style="width:300px;"></p>
+    <p id="health">Checking server...</p>
+    <hr>
+    <input type="file" id="file" accept=".docx,.xlsx">
+    <p id="status">Select a file to upload</p>
+    <hr>
+    <p>Page: <button id="prev" disabled>&larr;</button> <span id="page-info">0/0</span> <button id="next" disabled>&rarr;</button></p>
+    <canvas id="canvas" style="border:1px solid #ccc; max-width:100%;"></canvas>
+    
+    <script>
+        const serverUrl = document.getElementById('server-url');
+        const health = document.getElementById('health');
+        const status = document.getElementById('status');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const pageInfo = document.getElementById('page-info');
+        const prevBtn = document.getElementById('prev');
+        const nextBtn = document.getElementById('next');
+        
+        let jobId = null;
+        let currentPage = 1;
+        let totalPages = 0;
+        
+        // Check health on load and when URL changes
+        async function checkHealth() {
+            try {
+                const resp = await fetch(serverUrl.value + '/health');
+                const data = await resp.json();
+                health.textContent = 'Server OK - v' + data.version + ', ' + data.jobs_count + ' jobs';
+                health.style.color = 'green';
+            } catch (e) {
+                health.textContent = 'Server unreachable: ' + e.message;
+                health.style.color = 'red';
+            }
+        }
+        checkHealth();
+        serverUrl.onchange = checkHealth;
+        
+        // File upload
+        document.getElementById('file').onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            status.textContent = 'Uploading ' + file.name + '...';
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                // Upload
+                const uploadResp = await fetch(serverUrl.value + '/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const uploadData = await uploadResp.json();
+                jobId = uploadData.job_id;
+                status.textContent = 'Job created: ' + jobId + ' - Converting...';
+                
+                // Poll for completion
+                while (true) {
+                    const jobResp = await fetch(serverUrl.value + '/api/job/' + jobId);
+                    const job = await jobResp.json();
+                    
+                    if (job.status === 'completed') {
+                        totalPages = job.page_count;
+                        currentPage = 1;
+                        status.textContent = 'Done! ' + totalPages + ' pages';
+                        updateNav();
+                        renderPage(1);
+                        break;
+                    } else if (job.status === 'failed') {
+                        status.textContent = 'Failed: ' + job.error;
+                        break;
+                    }
+                    
+                    status.textContent = 'Status: ' + job.status + '...';
+                    await new Promise(r => setTimeout(r, 500));
+                }
+            } catch (e) {
+                status.textContent = 'Error: ' + e.message;
+            }
+        };
+        
+        async function renderPage(page) {
+            if (!jobId || page < 1 || page > totalPages) return;
+            
+            currentPage = page;
+            updateNav();
+            
+            const resp = await fetch(serverUrl.value + '/api/job/' + jobId + '/png/' + page);
+            const blob = await resp.blob();
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                URL.revokeObjectURL(img.src);
+            };
+            img.src = URL.createObjectURL(blob);
+        }
+        
+        function updateNav() {
+            pageInfo.textContent = currentPage + '/' + totalPages;
+            prevBtn.disabled = currentPage <= 1;
+            nextBtn.disabled = currentPage >= totalPages;
+        }
+        
+        prevBtn.onclick = () => renderPage(currentPage - 1);
+        nextBtn.onclick = () => renderPage(currentPage + 1);
+    </script>
+</body>
+</html>

@@ -26,6 +26,7 @@ A high-performance Rust library for converting Microsoft Office documents (.docx
 | Crate | Description |
 |-------|-------------|
 | `office-to-png-core` | Server-side conversion using LibreOffice + pdfium |
+| `office-to-png-server` | HTTP API server for document conversion (REST API) |
 | `office-to-png-wasm` | Browser-side rendering with Canvas 2D or WebGPU |
 | `office-to-png-python` | Python bindings via PyO3 |
 
@@ -245,6 +246,67 @@ asyncio.run(main())
 
 See `examples/python_quickstart.py` for a complete walkthrough.
 
+### HTTP API Server
+
+The server crate provides a REST API for document conversion with **100% fidelity** using LibreOffice:
+
+```bash
+# Run the server (uses local filesystem storage by default)
+cargo run -p office-to-png-server
+
+# Run on a custom port
+PORT=8085 cargo run -p office-to-png-server
+
+# Or with Docker
+docker-compose -f deploy/docker-compose.yml up
+```
+
+**API Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/upload` | Upload document, returns job ID |
+| `GET` | `/api/job/:id` | Get job status |
+| `GET` | `/api/job/:id/pdf` | Download converted PDF |
+| `GET` | `/api/job/:id/png/:page` | Download specific PNG page (1-indexed) |
+| `DELETE` | `/api/job/:id` | Delete job and files |
+| `GET` | `/api/jobs` | List all jobs |
+| `GET` | `/health` | Health check |
+
+**Example:**
+
+```bash
+# Upload a document
+curl -X POST -F "file=@document.docx" http://localhost:8080/api/upload
+# Returns: {"job_id": "abc123", "status": "pending", ...}
+
+# Check status (poll until "completed")
+curl http://localhost:8080/api/job/abc123
+# Returns: {"job_id": "abc123", "status": "completed", "page_count": 5, ...}
+
+# Download PNG page 1
+curl http://localhost:8080/api/job/abc123/png/1 -o page1.png
+```
+
+**Environment Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8080` | Server port |
+| `HOST` | `0.0.0.0` | Server host |
+| `STORAGE_BACKEND` | auto | `local` or `s3` (auto-detects based on `S3_BUCKET`) |
+| `STORAGE_DIR` | system temp | Directory for local storage |
+| `S3_BUCKET` | - | S3 bucket (enables S3 mode when set) |
+| `S3_ENDPOINT` | - | Custom S3 endpoint (for LocalStack/MinIO) |
+| `AWS_REGION` | - | AWS region |
+| `POOL_SIZE` | `2` | LibreOffice instance count |
+| `DPI` | `150` | PNG rendering DPI |
+
+**Storage Backends:**
+
+- **Local (default)**: Files stored on local filesystem. No AWS setup required - perfect for development.
+- **S3**: Set `S3_BUCKET` to enable. Supports LocalStack/MinIO via `S3_ENDPOINT`.
+
 ## Configuration
 
 ### Converter Options
@@ -281,6 +343,11 @@ office-to-png/
 │   │   ├── pool.rs         # LibreOffice instance pooling
 │   │   └── pdf_renderer.rs # pdfium-based PDF to PNG
 │   │
+│   ├── server/         # HTTP API server
+│   │   ├── handlers.rs     # API endpoint handlers
+│   │   ├── job.rs          # Job tracking and management
+│   │   └── storage.rs      # Storage backends (local filesystem + S3)
+│   │
 │   ├── wasm/           # Browser-side: Direct rendering
 │   │   ├── docx_renderer.rs  # DOCX parsing + rendering
 │   │   ├── xlsx_renderer.rs  # XLSX parsing + rendering
@@ -295,8 +362,14 @@ office-to-png/
 │   │
 │   └── python/         # Python bindings via PyO3
 │
+├── deploy/             # Deployment configurations
+│   ├── Dockerfile      # Server container
+│   └── docker-compose.yml  # Local dev with LocalStack
+│
 ├── demo/               # Interactive browser demo
 │   ├── index.html      # Demo UI with drag-and-drop
+│   ├── test.html       # Minimal WASM test page
+│   ├── test-server.html # Server HD mode test page
 │   ├── worker.js       # Web Worker for async document parsing
 │   └── pkg/            # Built WASM package
 │
@@ -405,14 +478,24 @@ wasm-pack build crates/wasm --target web
 # Copy to demo folder
 cp -r crates/wasm/pkg/* demo/pkg/
 
-# Serve the demo
-cd demo
-python3 -m http.server 8080
-# Open http://localhost:8080 in your browser
+# Option 1: Local-only mode (WASM rendering in browser)
+cd demo && python3 -m http.server 8000
+# Open http://localhost:8000
+
+# Option 2: With HD server mode (LibreOffice rendering)
+# Terminal 1: Start the API server
+PORT=8085 cargo run -p office-to-png-server
+
+# Terminal 2: Serve the demo
+cd demo && python3 -m http.server 8000
+# Open http://localhost:8000, select "Server HD" mode
 ```
 
 The demo includes:
-- Drag-and-drop file upload
+- Drag-and-drop file upload (click or drop)
+- Two rendering modes:
+  - **Local (Fast)**: WASM-based rendering in browser
+  - **Server HD**: LibreOffice-based rendering for 100% fidelity
 - DOCX page navigation
 - XLSX sheet tabs with smooth switching
 - Zoom controls

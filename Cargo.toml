@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/python",
     "crates/wasm",
+    "crates/server",
     "tests/fixtures/generator",
 ]
 

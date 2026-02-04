@@ -69,6 +69,7 @@
         }
 
         .drop-zone {
+            display: block;
             border: 2px dashed #d1d5db;
             border-radius: 8px;
             padding: 2rem 1rem;
@@ -362,6 +363,23 @@
         .error-message.visible {
             display: block;
         }
+
+        /* Server options hidden by default, shown when server mode selected */
+        .server-options {
+            display: none;
+        }
+        
+        body.server-mode .server-options {
+            display: flex;
+        }
+        
+        #server-status {
+            display: none !important;
+        }
+        
+        body.server-mode #server-status {
+            display: block !important;
+        }
     </style>
 </head>
 <body>
@@ -374,14 +392,14 @@
         <aside class="sidebar">
             <div class="card">
                 <h3>Load Document</h3>
-                <div class="drop-zone" id="drop-zone">
+                <div class="drop-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                     </svg>
                     <p>Drop file here or click to browse</p>
                     <p class="file-types">.docx, .xlsx supported</p>
                 </div>
-                <input type="file" id="file-input" accept=".docx,.xlsx">
+                <input type="file" id="file-input" accept=".docx,.xlsx" style="display:none;">
             </div>
 
             <div class="card doc-info" id="doc-info">
@@ -405,6 +423,25 @@
                         <span id="page-info">Page 1 of 1</span>
                         <button id="next-page" disabled>Next &rarr;</button>
                     </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Rendering</h3>
+                <div class="controls">
+                    <div class="control-row">
+                        <label>Mode</label>
+                        <select id="render-mode" style="padding: 0.25rem 0.5rem; border: 1px solid #d1d5db; border-radius: 4px;">
+                            <option value="local">Local (Fast)</option>
+                            <option value="server">Server HD (LibreOffice)</option>
+                        </select>
+                    </div>
+                    <div class="control-row server-options" id="server-url-row">
+                        <label>Server URL</label>
+                        <input type="text" id="server-url" value="http://localhost:8085" 
+                               style="flex: 1; margin-left: 0.5rem; padding: 0.25rem 0.5rem; border: 1px solid #d1d5db; border-radius: 4px; font-size: 0.75rem;">
+                    </div>
+                    <div class="server-options" id="server-status" style="font-size: 0.75rem; color: #6b7280; margin-top: 0.25rem;"></div>
                 </div>
             </div>
 
@@ -439,8 +476,35 @@
         </main>
     </div>
 
+    <!-- Simple inline script for UI that doesn't need WASM -->
+    <script>
+        // Server mode toggle - works even if WASM fails to load
+        document.getElementById('render-mode').addEventListener('change', function(e) {
+            document.body.classList.toggle('server-mode', e.target.value === 'server');
+            if (e.target.value === 'server') {
+                // Check server health
+                const serverUrl = document.getElementById('server-url').value;
+                const status = document.getElementById('server-status');
+                status.textContent = 'Checking server...';
+                fetch(serverUrl + '/health', { mode: 'cors' })
+                    .then(r => r.json())
+                    .then(d => { status.textContent = 'Server OK (v' + d.version + ')'; status.style.color = '#059669'; })
+                    .catch(e => { status.textContent = 'Cannot reach server'; status.style.color = '#dc2626'; });
+            }
+        });
+    </script>
+
     <script type="module">
         import init, { DocumentRenderer, supported_extensions } from './pkg/office_to_png_wasm.js';
+        
+        // PDF.js is optional - only needed for server mode (we fetch PNGs directly now)
+        let pdfjsLib = null;
+        
+        // Wrap everything in error handler
+        window.onerror = (msg, url, line) => {
+            document.getElementById('status-text').textContent = 'JS Error: ' + msg;
+            console.error('Error:', msg, url, line);
+        };
 
         // ==========================================================================
         // DOM Elements
@@ -465,6 +529,10 @@
         const statusText = document.getElementById('status-text');
         const renderTime = document.getElementById('render-time');
         const errorMessage = document.getElementById('error-message');
+        const renderModeSelect = document.getElementById('render-mode');
+        const serverUrlInput = document.getElementById('server-url');
+        const serverUrlRow = document.getElementById('server-url-row');
+        const serverStatus = document.getElementById('server-status');
 
         // ==========================================================================
         // State
@@ -477,6 +545,12 @@
         let documentType = null;
         let renderer = null;
         let wasmLoaded = false;
+        
+        // Server HD mode state
+        let renderMode = 'local';  // 'local' or 'server'
+        let serverJobId = null;    // Current server job ID
+        let serverPdfUrl = null;   // URL to fetch PDF from server
+        let pdfDoc = null;         // pdf.js document object
 
         // Web Worker state
         let worker = null;
@@ -785,11 +859,15 @@
                 updatePageNav();
                 exportBtn.disabled = false;
                 
-                // Render the initial view (use sync for first render, it's faster)
-                renderDocumentSync();
-                
-                renderTime.textContent = `Loaded in ${loadTime.toFixed(0)}ms`;
-                setStatus('ready', 'Document loaded');
+                // Render based on selected mode
+                if (renderMode === 'server') {
+                    uploadToServerAndRender();
+                } else {
+                    // Use sync for first render, it's faster
+                    renderDocumentSync();
+                    renderTime.textContent = `Loaded in ${loadTime.toFixed(0)}ms`;
+                    setStatus('ready', 'Document loaded');
+                }
 
             } catch (err) {
                 console.error('Load error:', err);
@@ -835,7 +913,13 @@
             
             currentPage = page;
             updatePageNav();
-            renderDocument();
+            
+            // Use server rendering if in server mode with an active job
+            if (renderMode === 'server' && serverJobId) {
+                fetchAndRenderPdf(serverUrlInput.value, serverJobId);
+            } else {
+                renderDocument();
+            }
         }
 
         prevPage.addEventListener('click', () => goToPage(currentPage - 1));
@@ -1023,10 +1107,176 @@
         });
 
         // ==========================================================================
+        // Server HD Mode (LibreOffice + pdf.js)
+        // ==========================================================================
+
+        // Handle render mode change
+        renderModeSelect.addEventListener('change', (e) => {
+            renderMode = e.target.value;
+            document.body.classList.toggle('server-mode', renderMode === 'server');
+            
+            if (renderMode === 'server') {
+                checkServerHealth();
+            }
+            
+            // Re-render current document if loaded
+            if (currentFile && currentDocBytes) {
+                if (renderMode === 'server') {
+                    uploadToServerAndRender();
+                } else {
+                    renderDocument();
+                }
+            }
+        });
+
+        // Check server health
+        async function checkServerHealth() {
+            const serverUrl = serverUrlInput.value;
+            serverStatus.textContent = 'Checking server...';
+            serverStatus.style.color = '#6b7280';
+            
+            try {
+                const resp = await fetch(`${serverUrl}/health`, { 
+                    method: 'GET',
+                    mode: 'cors'
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    serverStatus.textContent = `Server OK (v${data.version}, ${data.jobs_count} jobs)`;
+                    serverStatus.style.color = '#059669';
+                } else {
+                    serverStatus.textContent = `Server error: ${resp.status}`;
+                    serverStatus.style.color = '#dc2626';
+                }
+            } catch (err) {
+                serverStatus.textContent = `Cannot reach server: ${err.message}`;
+                serverStatus.style.color = '#dc2626';
+            }
+        }
+
+        // Upload document to server and render via PDF
+        async function uploadToServerAndRender() {
+            if (!currentFile || !currentDocBytes) return;
+            
+            const serverUrl = serverUrlInput.value;
+            showLoading('Uploading to server...');
+            
+            try {
+                // Create form data with file
+                const formData = new FormData();
+                formData.append('file', new Blob([currentDocBytes]), currentFile.name);
+                
+                // Upload to server
+                const uploadResp = await fetch(`${serverUrl}/api/upload`, {
+                    method: 'POST',
+                    body: formData,
+                    mode: 'cors'
+                });
+                
+                if (!uploadResp.ok) {
+                    const err = await uploadResp.json();
+                    throw new Error(err.message || `Upload failed: ${uploadResp.status}`);
+                }
+                
+                const uploadData = await uploadResp.json();
+                serverJobId = uploadData.job_id;
+                console.log('Server job created:', serverJobId);
+                
+                // Poll for completion
+                showLoading('Converting with LibreOffice...');
+                await pollJobStatus(serverUrl, serverJobId);
+                
+                // Fetch and render PDF
+                showLoading('Rendering HD PDF...');
+                await fetchAndRenderPdf(serverUrl, serverJobId);
+                
+                setStatus('ready', 'HD render complete');
+            } catch (err) {
+                console.error('Server render error:', err);
+                showError(`Server error: ${err.message}`);
+                // Fall back to local rendering
+                renderMode = 'local';
+                renderModeSelect.value = 'local';
+                serverUrlRow.style.display = 'none';
+                renderDocument();
+            } finally {
+                hideLoading();
+            }
+        }
+
+        // Poll job status until completed
+        async function pollJobStatus(serverUrl, jobId) {
+            const maxAttempts = 60; // 60 seconds max
+            let attempts = 0;
+            
+            while (attempts < maxAttempts) {
+                const resp = await fetch(`${serverUrl}/api/job/${jobId}`, { mode: 'cors' });
+                if (!resp.ok) {
+                    throw new Error(`Failed to get job status: ${resp.status}`);
+                }
+                
+                const job = await resp.json();
+                console.log('Job status:', job.status);
+                
+                if (job.status === 'completed') {
+                    totalPages = job.page_count || 1;
+                    return job;
+                } else if (job.status === 'failed') {
+                    throw new Error(job.error || 'Conversion failed');
+                }
+                
+                // Wait 1 second before next poll
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                attempts++;
+            }
+            
+            throw new Error('Conversion timeout');
+        }
+
+        // Fetch PDF from server and render with pdf.js
+        async function fetchAndRenderPdf(serverUrl, jobId) {
+            // For now, we'll fetch PNG pages directly since the server produces them
+            // In a full implementation, we'd fetch the PDF and use pdf.js
+            
+            // Fetch first PNG page
+            const pngResp = await fetch(`${serverUrl}/api/job/${jobId}/png/${currentPage + 1}`, { mode: 'cors' });
+            if (!pngResp.ok) {
+                throw new Error(`Failed to fetch PNG: ${pngResp.status}`);
+            }
+            
+            const pngBlob = await pngResp.blob();
+            const pngUrl = URL.createObjectURL(pngBlob);
+            
+            // Draw on canvas
+            const img = new Image();
+            img.onload = () => {
+                // Resize canvas to match image
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                URL.revokeObjectURL(pngUrl);
+                
+                renderTime.textContent = `Rendered HD (server)`;
+                updatePageNav();
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(pngUrl);
+                throw new Error('Failed to load PNG image');
+            };
+            img.src = pngUrl;
+        }
+
+
+
+        // ==========================================================================
         // Initialize on Load
         // ==========================================================================
         
-        initApp();
+        initApp().catch(err => {
+            console.error('Init failed:', err);
+            document.getElementById('status-text').textContent = 'Init failed: ' + err.message;
+            document.getElementById('status-dot').className = 'status-dot error';
+        });
     </script>
 </body>
 </html>
