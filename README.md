@@ -65,6 +65,8 @@ wasm-pack build crates/wasm --target web
 
 ### Python
 
+**Note**: Requires Python 3.8-3.13 (Python 3.14+ not yet supported by PyO3).
+
 ```bash
 cd crates/python
 
